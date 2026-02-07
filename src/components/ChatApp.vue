@@ -128,9 +128,14 @@ const streamInfo = ref('')
 const STRATEGY_STREAM_INFO = 'Deciding information sources...'
 const DEFAULT_STREAM_INFO = 'Contacting model...'
 const STREAMING_INFO = 'Generating response...'
+const MOBILE_BREAKPOINT = 774
 const serverStatus = ref<'pending' | 'online' | 'offline'>('pending')
 const serverName = ref(SERVER_NAME)
-const isMobileWidth = ref(false)
+const isMobileWidth = ref(
+  typeof window !== 'undefined'
+    ? window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`).matches
+    : false,
+)
 const serverStatusLabel = computed(() => {
   switch (serverStatus.value) {
     case 'online':
@@ -526,7 +531,7 @@ function startServerHealthPolling() {
 
 function startMobileWidthWatcher() {
   if (typeof window === 'undefined') return
-  const mediaQuery = window.matchMedia('(max-width: 743px)')
+  const mediaQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
   const update = (event: MediaQueryList | MediaQueryListEvent) => {
     isMobileWidth.value = event.matches
   }
@@ -817,7 +822,7 @@ onBeforeUnmount(() => {
       flex-shrink: 0;
       padding-left:72px;
 
-      @media (min-width: 744px) {
+      @media (min-width: $bp-mobile) {
         padding-left: 24px;
       }
     }
@@ -917,7 +922,7 @@ onBeforeUnmount(() => {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
+    padding: 8px 10px;
     border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(255, 255, 255, 0.04);
@@ -941,7 +946,7 @@ onBeforeUnmount(() => {
   }
 
   .web-toggle-icon {
-    display: none;
+    display: inline-flex;
     width: 16px;
     height: 16px;
     align-items: center;
@@ -985,17 +990,21 @@ onBeforeUnmount(() => {
     background: #f8fafc;
   }
 
-  @media (max-width: 700px) {
+  .web-toggle-label {
+    display: none;
+  }
+
+  @media (min-width: $bp-mobile) {
     .web-toggle-label {
-      display: none;
+      display: inline;
     }
 
     .web-toggle-icon {
-      display: inline-flex;
+      display: none;
     }
 
     .web-toggle {
-      padding: 8px 10px;
+      padding: 8px 12px;
     }
   }
 

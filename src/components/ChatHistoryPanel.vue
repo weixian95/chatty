@@ -34,9 +34,6 @@
           </li>
         </ul>
       </div>
-      <button class="refresh-list" type="button" @click="handleRefreshConversations">
-        Refresh list
-      </button>
     </div>
   </div>
   <teleport to="body">
@@ -226,10 +223,6 @@ async function handleOpenConversation(id: string) {
   } catch (err) {
     errorMessage.value = `Chat load error: ${(err as Error).message}`
   }
-}
-
-function handleRefreshConversations() {
-  void fetchChatList({ showLoading: false })
 }
 
 function clearPendingRefresh() {
@@ -429,6 +422,9 @@ async function confirmDeleteConversation() {
 
 onMounted(fetchChatList)
 onMounted(() => {
+  if (props.isMobile) {
+    isCollapsed.value = true
+  }
   window.addEventListener('keydown', handleDeleteKeydown)
 })
 onBeforeUnmount(() => {
@@ -466,7 +462,7 @@ defineExpose({ refreshList: fetchChatList })
     flex-direction: column;
     transition: width 0.3s;
 
-    @media (min-width: 744px) {
+    @media (min-width: $bp-mobile) {
       position: relative;
     }
 
@@ -474,7 +470,7 @@ defineExpose({ refreshList: fetchChatList })
       width: 0;
       overflow: visible;
 
-      @media (min-width: 744px) {
+      @media (min-width: $bp-mobile) {
         width: 64px;
       }
 
@@ -614,21 +610,6 @@ defineExpose({ refreshList: fetchChatList })
     font-size: 0.75rem;
   }
 
-  .refresh-list {
-    margin-top: auto;
-    border: 1px solid rgba(148, 163, 184, 0.35);
-    background: rgba(148, 163, 184, 0.12);
-    color: #d6dde8;
-    font: inherit;
-    padding: 10px 12px;
-    border-radius: 12px;
-    cursor: pointer;
-  }
-
-  .refresh-list:hover {
-    border-color: rgba(148, 163, 184, 0.6);
-    color: #f2f6ff;
-  }
 }
 
 .delete-overlay {

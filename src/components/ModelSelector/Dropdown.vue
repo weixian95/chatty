@@ -36,6 +36,7 @@ function handleChange(event: Event) {
 <style lang="scss">
 .select {
   width: 100%;
+  max-width: 360px;
   padding: 10px 36px 10px 12px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);

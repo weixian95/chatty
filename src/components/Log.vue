@@ -1,5 +1,9 @@
 <template>
   <div class="chat-log" ref="logRef">
+    <div v-if="!messages.length" class="empty-state">
+      <div class="empty-title">Start a new chat</div>
+      <div class="empty-subtitle">Pick a model, toggle web search if needed, and send a prompt.</div>
+    </div>
     <div
       v-for="message in messages"
       :key="message.id"
@@ -99,6 +103,27 @@ defineExpose({ scrollToBottom })
   overflow-y: auto;
   padding: 24px;
   box-sizing: border-box;
+}
+
+.empty-state {
+  margin: auto;
+  text-align: center;
+  color: rgba(231, 237, 247, 0.7);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 360px;
+}
+
+.empty-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: rgba(231, 237, 247, 0.9);
+}
+
+.empty-subtitle {
+  font-size: 0.85rem;
+  line-height: 1.5;
 }
 
 .message {

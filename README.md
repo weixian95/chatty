@@ -24,16 +24,6 @@ Replace the URL with your own private host.
 
 Chatty stores a stable `user_id` in `localStorage` so the server can associate chats with the same user across sessions. Chat history is **not** stored locally.
 
-## Development
+## Demo
+This project is published at [my github page](https://weixian95.github.io/tools/chatty/). Access to the backend is restricted to the private Tailnet; visitors outside the Tailnet can load the UI but will see the server as offline.
 
-```bash
-pnpm install
-pnpm dev
-```
-
-## Build
-
-```bash
-pnpm build
-pnpm preview
-```
