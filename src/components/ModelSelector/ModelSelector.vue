@@ -8,9 +8,6 @@
       :loading="loading"
       :disabled="busy"
     />
-    <button class="ghost" type="button" :disabled="busy" @click="emit('refresh')">
-      Refresh
-    </button>
   </div>
 </template>
 
@@ -27,7 +24,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'update:modelValue', value: string): void
-  (event: 'refresh'): void
 }>()
 
 const modelProxy = computed({
@@ -39,7 +35,7 @@ const modelProxy = computed({
 <style lang="scss">
 .row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
 }
@@ -50,24 +46,4 @@ const modelProxy = computed({
   font-size: 0.9rem;
 }
 
-.ghost {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(22, 28, 40, 0.65);
-  color: #dbe3ef;
-  font: inherit;
-  padding: 8px 12px;
-  border-radius: 10px;
-  cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease;
-}
-
-.ghost:hover:not(:disabled) {
-  border-color: rgba(111, 195, 255, 0.5);
-  color: #f2f7ff;
-}
-
-.ghost:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
 </style>

@@ -6,6 +6,7 @@
       :busy="busy"
       :api-base="API_BASE"
       :user-id="userId"
+      :is-mobile="isMobileWidth"
       @clear="handleClearActiveChat"
       @open="handleOpenConversation"
     />
@@ -29,24 +30,34 @@
             :models="models"
             :loading="loadingModels"
             :busy="busy"
-            @refresh="loadModels"
           />
           <button
             class="web-toggle"
             type="button"
             :aria-pressed="useWebSearch"
+            aria-label="Toggle web search"
             :disabled="busy"
             @click="toggleWebSearch"
           >
             <span class="web-toggle-track" aria-hidden="true">
               <span class="web-toggle-knob"></span>
             </span>
-            Web search
+            <span class="web-toggle-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                <circle cx="12" cy="12" r="8.5" />
+                <path d="M3.8 12h16.4" />
+                <path d="M12 3.5c3 3.2 3 13.8 0 17" />
+                <path d="M12 3.5c-3 3.2-3 13.8 0 17" />
+              </svg>
+            </span>
+            <span class="web-toggle-label">Web search</span>
           </button>
         </div>
         <form class="prompt" @submit.prevent="handleSubmit">
-          <PromptInput v-model="prompt" :disabled="busy" @submit="handleSubmit" />
-          <button class="primary" type="submit" :disabled="busy">Send</button>
+          <div class="prompt-field">
+            <PromptInput v-model="prompt" :disabled="busy" @submit="handleSubmit" />
+            <button class="primary send-inside" type="submit" :disabled="busy">Send</button>
+          </div>
         </form>
       </div>
     </div>
@@ -119,6 +130,7 @@ const DEFAULT_STREAM_INFO = 'Contacting model...'
 const STREAMING_INFO = 'Generating response...'
 const serverStatus = ref<'pending' | 'online' | 'offline'>('pending')
 const serverName = ref(SERVER_NAME)
+const isMobileWidth = ref(false)
 const serverStatusLabel = computed(() => {
   switch (serverStatus.value) {
     case 'online':
@@ -512,6 +524,26 @@ function startServerHealthPolling() {
   void runServerHealthCheck()
 }
 
+function startMobileWidthWatcher() {
+  if (typeof window === 'undefined') return
+  const mediaQuery = window.matchMedia('(max-width: 743px)')
+  const update = (event: MediaQueryList | MediaQueryListEvent) => {
+    isMobileWidth.value = event.matches
+  }
+  update(mediaQuery)
+  if ('addEventListener' in mediaQuery) {
+    mediaQuery.addEventListener('change', update)
+    onBeforeUnmount(() => {
+      mediaQuery.removeEventListener('change', update)
+    })
+  } else {
+    mediaQuery.addListener(update)
+    onBeforeUnmount(() => {
+      mediaQuery.removeListener(update)
+    })
+  }
+}
+
 function loadModelPreference() {
   try {
     const stored = localStorage.getItem(MODEL_STORAGE_KEY)
@@ -753,6 +785,7 @@ onMounted(loadModelPreference)
 onMounted(loadWebSearchPreference)
 onMounted(loadModels)
 onMounted(startServerHealthPolling)
+onMounted(startMobileWidthWatcher)
 onBeforeUnmount(() => {
   clearServerHealthTimer()
 })
@@ -782,6 +815,11 @@ onBeforeUnmount(() => {
       font-weight: 600;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       flex-shrink: 0;
+      padding-left:72px;
+
+      @media (min-width: 744px) {
+        padding-left: 24px;
+      }
     }
 
     .brand {
@@ -799,7 +837,8 @@ onBeforeUnmount(() => {
       border: 1px solid rgba(255, 255, 255, 0.08);
       padding: 6px 10px;
       border-radius: 999px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      white-space: nowrap;
     }
 
     .status-dot {
@@ -839,6 +878,7 @@ onBeforeUnmount(() => {
     .status-alert {
       font-size: 0.72rem;
       color: rgba(255, 215, 209, 0.9);
+      white-space: nowrap;
     }
   }
 
@@ -864,7 +904,13 @@ onBeforeUnmount(() => {
     display: flex;
     gap: 12px;
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .prompt-controls .row {
+    flex: 1;
+    min-width: 0;
   }
 
   .web-toggle {
@@ -892,6 +938,19 @@ onBeforeUnmount(() => {
     border-color: rgba(79, 167, 255, 0.6);
     background: rgba(79, 167, 255, 0.18);
     color: #f4f8ff;
+  }
+
+  .web-toggle-icon {
+    display: none;
+    width: 16px;
+    height: 16px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .web-toggle-icon svg {
+    width: 16px;
+    height: 16px;
   }
 
   .web-toggle-track {
@@ -926,10 +985,22 @@ onBeforeUnmount(() => {
     background: #f8fafc;
   }
 
+  @media (max-width: 700px) {
+    .web-toggle-label {
+      display: none;
+    }
+
+    .web-toggle-icon {
+      display: inline-flex;
+    }
+
+    .web-toggle {
+      padding: 8px 10px;
+    }
+  }
+
   .prompt {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 12px;
+    display: block;
   }
 
   .primary {
@@ -945,6 +1016,23 @@ onBeforeUnmount(() => {
   .primary:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .prompt-field {
+    position: relative;
+  }
+
+  .prompt-field .input {
+    padding-right: 110px;
+  }
+
+  .send-inside {
+    position: absolute;
+    right: 8px;
+    bottom: 14px;
+    height: 40px;
+    padding: 0 18px;
+    border-radius: 12px;
   }
 }
 </style>

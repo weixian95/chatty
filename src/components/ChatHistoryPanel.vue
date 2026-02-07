@@ -114,6 +114,7 @@ const props = defineProps<{
   busy: boolean
   apiBase: string
   userId: string
+  isMobile: boolean
 }>()
 
 const emit = defineEmits<{
@@ -219,6 +220,9 @@ async function handleOpenConversation(id: string) {
   try {
     const messages = await fetchChatMessages(id)
     emit('open', { chatId: id, messages })
+    if (props.isMobile) {
+      isCollapsed.value = true
+    }
   } catch (err) {
     errorMessage.value = `Chat load error: ${(err as Error).message}`
   }
@@ -443,25 +447,36 @@ watch(() => props.currentChatId, () => {
   fetchChatList({ showLoading: false })
 })
 
+
 defineExpose({ refreshList: fetchChatList })
 </script>
 
 <style lang="scss">
 .chat {
   .chat-settings-panel {
+    position: absolute;
+    z-index: 1;
     width: 320px;
     height: 100%;
     background-color: #0f141c;
     border-right: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 16px;
     box-sizing: border-box;
     display: flex;
     gap: 12px;
     flex-direction: column;
     transition: width 0.3s;
 
+    @media (min-width: 744px) {
+      position: relative;
+    }
+
     &.collapsed {
-      width: 72px;
+      width: 0;
+      overflow: visible;
+
+      @media (min-width: 744px) {
+        width: 64px;
+      }
 
       .panel-content {
         opacity: 0;
@@ -474,15 +489,16 @@ defineExpose({ refreshList: fetchChatList })
     display: flex;
     gap: 16px;
     flex-direction: column;
-    width: 288px;
+    width: 320px;
+    box-sizing: border-box;
+    padding: 16px;
     transition: opacity 0.3s;
     height: calc(100% - 50px);
   }
 
   .sidebar-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
+    position: relative;
+    padding: 16px;
   }
 
   .icon-button {
@@ -600,9 +616,9 @@ defineExpose({ refreshList: fetchChatList })
 
   .refresh-list {
     margin-top: auto;
-    border: 1px solid rgba(255, 138, 122, 0.3);
-    background: rgba(255, 138, 122, 0.08);
-    color: #ffb3a8;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(148, 163, 184, 0.12);
+    color: #d6dde8;
     font: inherit;
     padding: 10px 12px;
     border-radius: 12px;
@@ -610,8 +626,8 @@ defineExpose({ refreshList: fetchChatList })
   }
 
   .refresh-list:hover {
-    border-color: rgba(255, 138, 122, 0.6);
-    color: #ffd6cf;
+    border-color: rgba(148, 163, 184, 0.6);
+    color: #f2f6ff;
   }
 }
 
