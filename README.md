@@ -4,13 +4,15 @@ Its main goal is to provide a simple setup for interacting with various self-hos
 
 ## Features
 - Model picker (loads from `/api/tags` with `/api/models` fallback)
+- Web search toggle (client decides local vs web agent; sends `use_web`)
 - Server‑backed conversation list (`/api/chats?user_id=...`)
 - Load full message history per chat (`/api/chats/:chat_id/messages`)
 - Delete chat (`DELETE /api/chats/:chat_id`)
-- Markdown rendering with sanitization
+- Source citations rendered from structured sources
 
 ## Requirements
-- Self‑hosted AI memory server API running and reachable from your private network (setup: see [here](https://github.com/weixian95/brain-at-home).)
+- Self‑hosted AI memory server API running and reachable on your private network (setup: see [here](https://github.com/weixian95/brain-at-home).)
+- Chatty must run on a machine logged into the same Tailscale network as the AI server.
 
 ## Configure API
 Set `VITE_API_BASE` in `.env.local`.
