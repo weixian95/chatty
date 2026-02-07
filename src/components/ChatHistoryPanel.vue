@@ -25,7 +25,7 @@
                 class="delete-conversation"
                 type="button"
                 title="Delete chat"
-                @click.stop="handleDeleteConversation(item.chatId)"
+                @click.stop="openDeleteDialog(item.chatId)"
               >
                 Delete
               </button>
@@ -39,10 +39,45 @@
       </button>
     </div>
   </div>
+  <teleport to="body">
+    <div
+      v-if="deleteDialogOpen"
+      class="delete-overlay"
+      role="presentation"
+      @click.self="handleBackdropClick"
+    >
+      <div class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+        <div class="delete-dialog-header">
+          <h3 id="delete-title">Delete chat?</h3>
+          <p class="delete-dialog-subtitle">
+            Delete "<span>{{ deleteTargetTitle }}</span>"? This cannot be undone.
+          </p>
+        </div>
+        <div class="delete-dialog-actions">
+          <button
+            class="dialog-button ghost"
+            type="button"
+            :disabled="deleteBusy || props.busy"
+            @click="closeDeleteDialog"
+          >
+            Cancel
+          </button>
+          <button
+            class="dialog-button danger"
+            type="button"
+            :disabled="deleteBusy || props.busy"
+            @click="confirmDeleteConversation"
+          >
+            Delete chat
+          </button>
+        </div>
+      </div>
+    </div>
+  </teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type MessageLike = {
   id: string
@@ -94,6 +129,15 @@ const pendingRefreshTimer = ref<number | null>(null)
 const pendingChatId = ref<string | null>(null)
 const pendingAttempts = ref(0)
 const MAX_PENDING_ATTEMPTS = 6
+const deleteDialogOpen = ref(false)
+const deleteTargetId = ref<string | null>(null)
+const deleteTargetTitle = ref('')
+const deleteBusy = ref(false)
+const handleDeleteKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape' && deleteDialogOpen.value && !deleteBusy.value && !props.busy) {
+    closeDeleteDialog()
+  }
+}
 
 const conversationItems = computed<ConversationItem[]>(() => {
   if (isLoading.value) {
@@ -153,6 +197,28 @@ function toggleSidebar() {
 function handleNewChat() {
   if (props.busy) return
   emit('clear')
+}
+
+function findConversationTitle(chatId: string) {
+  return conversations.value.find((item) => item.chatId === chatId)?.title ?? fallbackTitle(chatId)
+}
+
+function openDeleteDialog(chatId: string) {
+  if (isDisabledChatId(chatId) || props.busy) return
+  deleteTargetId.value = chatId
+  deleteTargetTitle.value = findConversationTitle(chatId)
+  deleteDialogOpen.value = true
+}
+
+function closeDeleteDialog() {
+  deleteDialogOpen.value = false
+  deleteTargetId.value = null
+  deleteTargetTitle.value = ''
+}
+
+function handleBackdropClick() {
+  if (deleteBusy.value || props.busy) return
+  closeDeleteDialog()
 }
 
 function isDisabledChatId(id: string) {
@@ -348,10 +414,10 @@ async function fetchChatMessages(chatId: string): Promise<MessageLike[]> {
     .filter((message) => message.raw.trim().length > 0)
 }
 
-async function handleDeleteConversation(chatId: string) {
-  if (isDisabledChatId(chatId) || props.busy) return
-  const confirmed = window.confirm('Delete this chat? This cannot be undone.')
-  if (!confirmed) return
+async function confirmDeleteConversation() {
+  const chatId = deleteTargetId.value
+  if (!chatId || deleteBusy.value || props.busy) return
+  deleteBusy.value = true
   try {
     const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
     if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
@@ -362,10 +428,19 @@ async function handleDeleteConversation(chatId: string) {
     void fetchChatList({ showLoading: false })
   } catch (err) {
     errorMessage.value = `Delete error: ${(err as Error).message}`
+  } finally {
+    deleteBusy.value = false
+    closeDeleteDialog()
   }
 }
 
 onMounted(fetchChatList)
+onMounted(() => {
+  window.addEventListener('keydown', handleDeleteKeydown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleDeleteKeydown)
+})
 watch(() => props.userId, () => {
   clearPendingRefresh()
   fetchChatList({ showLoading: false })
@@ -549,5 +624,85 @@ defineExpose({ refreshList: fetchChatList })
     border-color: rgba(255, 138, 122, 0.6);
     color: #ffd6cf;
   }
+}
+
+.delete-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 8, 14, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  backdrop-filter: blur(6px);
+}
+
+.delete-dialog {
+  width: min(420px, 90vw);
+  background: #101723;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  padding: 20px;
+  color: #e7edf7;
+}
+
+.delete-dialog-header h3 {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+}
+
+.delete-dialog-subtitle {
+  margin: 0;
+  color: rgba(231, 237, 247, 0.72);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.delete-dialog-subtitle span {
+  color: #f8fafc;
+  font-weight: 600;
+}
+
+.delete-dialog-actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.dialog-button {
+  border-radius: 10px;
+  padding: 10px 14px;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.dialog-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dialog-button.ghost {
+  background: rgba(255, 255, 255, 0.04);
+  color: #dbe5f5;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.dialog-button.ghost:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.dialog-button.danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: #ffe3e0;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.dialog-button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  border-color: rgba(239, 68, 68, 0.6);
 }
 </style>

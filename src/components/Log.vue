@@ -21,6 +21,23 @@
           </div>
           <div v-if="streamInfo" class="loading-text">{{ streamInfo }}</div>
         </div>
+        <div
+          v-if="message.citations && message.citations.length && message.html"
+          class="message-sources"
+        >
+          <div class="sources-label">Sources</div>
+          <div class="sources-list">
+            <a
+              v-for="source in message.citations"
+              :key="source.url"
+              :href="source.url"
+              target="_blank"
+              rel="noreferrer"
+            >
+              {{ source.title ? source.title : formatSourceLabel(source.url) }}
+            </a>
+          </div>
+        </div>
       </div>
       <div class="message-time">{{ formatTimestamp(message.ts) }}</div>
     </div>
@@ -36,6 +53,7 @@ type ChatMessage = {
   html: string
   ts?: number | null
   pending?: boolean
+  citations?: Array<{ url: string; title?: string }>
 }
 
 defineProps<{ messages: ChatMessage[]; streamInfo?: string }>()
@@ -49,6 +67,19 @@ function formatTimestamp(value?: number | null) {
     minute: '2-digit',
     second: '2-digit',
   })
+}
+
+function formatSourceLabel(value: string) {
+  try {
+    const url = new URL(value)
+    const host = url.hostname.replace(/^www\./, '')
+    const path = url.pathname && url.pathname !== '/' ? url.pathname : ''
+    if (!path) return host
+    const trimmed = path.length > 28 ? `${path.slice(0, 25)}...` : path
+    return `${host}${trimmed}`
+  } catch {
+    return value
+  }
 }
 
 function scrollToBottom() {
@@ -121,6 +152,37 @@ defineExpose({ scrollToBottom })
   font-size: 0.72rem;
   color: rgba(231, 237, 247, 0.7);
   text-align: right;
+}
+
+.message-sources {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources-label {
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(231, 237, 247, 0.55);
+}
+
+.sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources-list a {
+  font-size: 0.78rem;
+  color: #8cc8ff;
+}
+
+.sources-list a:hover {
+  color: #b6ddff;
 }
 
 .typing-indicator {

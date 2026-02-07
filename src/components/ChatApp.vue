@@ -22,13 +22,27 @@
         <Log ref="logRef" :messages="messages" :stream-info="streamInfo" />
       </div>
       <div class="prompt-input">
-        <ModelSelector
-          v-model="selectedModel"
-          :models="models"
-          :loading="loadingModels"
-          :busy="busy"
-          @refresh="loadModels"
-        />
+        <div class="prompt-controls">
+          <ModelSelector
+            v-model="selectedModel"
+            :models="models"
+            :loading="loadingModels"
+            :busy="busy"
+            @refresh="loadModels"
+          />
+          <button
+            class="web-toggle"
+            type="button"
+            :aria-pressed="useWebSearch"
+            :disabled="busy"
+            @click="toggleWebSearch"
+          >
+            <span class="web-toggle-track" aria-hidden="true">
+              <span class="web-toggle-knob"></span>
+            </span>
+            Web search
+          </button>
+        </div>
         <form class="prompt" @submit.prevent="handleSubmit">
           <PromptInput v-model="prompt" :disabled="busy" @submit="handleSubmit" />
           <button class="primary" type="submit" :disabled="busy">Send</button>
@@ -57,6 +71,7 @@ const ENDPOINTS = {
 }
 const USER_STORAGE_KEY = 'chatty-user-id-v1'
 const MODEL_STORAGE_KEY = 'chatty-selected-model-v1'
+const WEB_SEARCH_STORAGE_KEY = 'chatty-web-search-v1'
 
 const md = new MarkdownIt({
   linkify: true,
@@ -70,6 +85,7 @@ type Message = {
   html: string
   ts: number | null
   pending?: boolean
+  citations?: Array<{ url: string; title?: string }>
 }
 
 type StoredMessage = {
@@ -90,12 +106,14 @@ const prompt = ref('')
 const busy = ref(false)
 const userId = ref(loadUserId())
 const currentChatId = ref(createScopedId('chat'))
+const useWebSearch = ref(false)
 
 const historyRef = ref<HistoryPanelExpose | null>(null)
 const logRef = ref<InstanceType<typeof Log> | null>(null)
 const messages = ref<Message[]>([])
 const historyRefreshTimer = ref<number | null>(null)
 const streamInfo = ref('')
+const STRATEGY_STREAM_INFO = 'Deciding information sources...'
 const DEFAULT_STREAM_INFO = 'Contacting model...'
 const STREAMING_INFO = 'Generating response...'
 const serverStatus = ref<'pending' | 'online' | 'offline'>('pending')
@@ -187,6 +205,7 @@ function addMessage(role: Message['role'], text: string, ts?: number | null) {
     html: sanitizeMarkdown(text),
     ts: ts ?? Date.now(),
     pending: false,
+    citations: role === 'bot' ? extractCitations(text).map((url) => ({ url })) : [],
   })
   messages.value.push(message)
   nextTick(scrollToBottom)
@@ -200,18 +219,35 @@ function hydrateMessages(source: StoredMessage[]) {
     raw: message.raw,
     html: sanitizeMarkdown(message.raw),
     ts: typeof message.ts === 'number' ? message.ts : null,
+    citations: extractCitations(message.raw).map((url) => ({ url })),
   }))
 }
+
+type StreamCitation =
+  | string
+  | {
+      url?: string
+      link?: string
+      source?: string
+      title?: string
+    }
 
 type StreamEvent = {
   stage?: string
   content?: string
   query?: string
   freshness?: string
-  items?: Array<{ title?: string; source?: string }>
+  items?: Array<{ title?: string; source?: string; url?: string; link?: string }>
   count?: number
   with_content?: number
   error?: string
+  route?: string
+  decision?: string
+  target?: string
+  use_web_agent?: boolean
+  useWebAgent?: boolean
+  sources?: StreamCitation[]
+  citations?: StreamCitation[]
   done?: boolean
 }
 
@@ -220,6 +256,104 @@ function normalizeStreamText(value?: string, limit = 160) {
   const cleaned = value.replace(/\s+/g, ' ').trim()
   if (cleaned.length <= limit) return cleaned
   return `${cleaned.slice(0, Math.max(0, limit - 3))}...`
+}
+
+function normalizeUrl(value?: string) {
+  if (!value) return ''
+  let trimmed = value.trim()
+  trimmed = trimmed.replace(/^[<(]+/, '')
+  trimmed = trimmed.replace(/[)>.,;:!?]+$/, '')
+  try {
+    const url = new URL(trimmed)
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      return url.toString()
+    }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function getHostname(value?: string) {
+  if (!value) return ''
+  try {
+    const url = new URL(value)
+    return url.hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
+function extractCitations(text: string) {
+  const urls = new Set<string>()
+  const matches = text.matchAll(/https?:\/\/\S+/g)
+  for (const match of matches) {
+    const normalized = normalizeUrl(match[0])
+    if (normalized) {
+      urls.add(normalized)
+    }
+  }
+  return [...urls]
+}
+
+function mergeCitation(
+  target: Map<string, string | undefined>,
+  urlValue?: string,
+  title?: string,
+) {
+  const normalized = normalizeUrl(urlValue)
+  if (!normalized) return
+  if (!target.has(normalized) || !target.get(normalized)) {
+    target.set(normalized, title)
+  }
+}
+
+function collectCitationsFromEvent(
+  event: StreamEvent,
+  target: Map<string, string | undefined>,
+) {
+  const handleCitation = (item: StreamCitation) => {
+    if (typeof item === 'string') {
+      mergeCitation(target, item)
+      return
+    }
+    const urlValue = item.url || item.link || item.source
+    mergeCitation(target, urlValue, item.title)
+  }
+
+  if (Array.isArray(event.citations)) {
+    event.citations.forEach(handleCitation)
+  }
+  if (Array.isArray(event.sources)) {
+    event.sources.forEach(handleCitation)
+  }
+  if (Array.isArray(event.items)) {
+    event.items.forEach((item) => {
+      mergeCitation(target, item.url || item.link, item.title)
+    })
+  }
+}
+
+function applyCitations(message: Message, collected: Map<string, string | undefined>) {
+  extractCitations(message.raw).forEach((url) => mergeCitation(collected, url))
+  message.citations = [...collected.entries()].map(([url, title]) => ({ url, title }))
+
+  if (!message.citations.length) return
+  let updated = message.raw
+  for (const citation of message.citations) {
+    if (!citation.title) continue
+    const escaped = escapeRegExp(citation.url)
+    const pattern = new RegExp(`(^|[^\\]])\\(${escaped}\\)`, 'g')
+    updated = updated.replace(pattern, `$1([${citation.title}](${citation.url}))`)
+  }
+  if (updated !== message.raw) {
+    message.raw = updated
+    message.html = sanitizeMarkdown(message.raw)
+  }
 }
 
 function formatFreshness(value?: string) {
@@ -241,6 +375,27 @@ function formatStreamInfo(event: StreamEvent) {
   const stage = event.stage
   if (!stage) return ''
   switch (stage) {
+    case 'routing': {
+      const content = normalizeStreamText(event.content, 120)
+      return content ? `Routing: ${content}` : 'Routing request...'
+    }
+    case 'routing_decision': {
+      const explicit =
+        typeof event.use_web_agent === 'boolean'
+          ? event.use_web_agent
+            ? 'web agent'
+            : 'local model'
+          : typeof event.useWebAgent === 'boolean'
+            ? event.useWebAgent
+              ? 'web agent'
+              : 'local model'
+            : ''
+      const detail = normalizeStreamText(
+        event.content || event.route || event.decision || event.target || explicit,
+        120,
+      )
+      return detail ? `Routing: ${detail}` : 'Routing decision made.'
+    }
     case 'digest_prompt': {
       const content = normalizeStreamText(event.content, 120)
       return content ? `Digest: ${content}` : 'Digesting prompt...'
@@ -263,6 +418,23 @@ function formatStreamInfo(event: StreamEvent) {
         })
         .join(' | ')
       return `Sources: ${summary}`
+    }
+    case 'sources': {
+      const sources = Array.isArray(event.sources) ? event.sources : []
+      if (!sources.length) return 'Sources ready.'
+      const summary = sources
+        .slice(0, 3)
+        .map((item) => {
+          if (typeof item === 'string') {
+            return getHostname(item) || normalizeStreamText(item, 80)
+          }
+          const urlValue = item.url || item.link || item.source || ''
+          const title = normalizeStreamText(item.title, 80)
+          return title || getHostname(urlValue) || normalizeStreamText(urlValue, 80)
+        })
+        .filter(Boolean)
+        .join(' | ')
+      return summary ? `Sources ready: ${summary}` : 'Sources ready.'
     }
     case 'fetch_started':
       return typeof event.count === 'number'
@@ -358,12 +530,46 @@ function persistModelPreference() {
   }
 }
 
+function loadWebSearchPreference() {
+  try {
+    const stored = localStorage.getItem(WEB_SEARCH_STORAGE_KEY)
+    if (stored === '1') {
+      useWebSearch.value = true
+      return
+    }
+    if (stored === '0') {
+      useWebSearch.value = false
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function persistWebSearchPreference() {
+  try {
+    localStorage.setItem(WEB_SEARCH_STORAGE_KEY, useWebSearch.value ? '1' : '0')
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
 watch(
   () => selectedModel.value,
   () => {
     persistModelPreference()
   },
 )
+
+watch(
+  () => useWebSearch.value,
+  () => {
+    persistWebSearchPreference()
+  },
+)
+
+function toggleWebSearch() {
+  useWebSearch.value = !useWebSearch.value
+}
 
 async function loadModels() {
   loadingModels.value = true
@@ -387,7 +593,7 @@ async function loadModels() {
 }
 
 async function streamCompletion(model: string, text: string) {
-  streamInfo.value = DEFAULT_STREAM_INFO
+  streamInfo.value = STRATEGY_STREAM_INFO
   const payload = {
     user_id: userId.value,
     chat_id: currentChatId.value,
@@ -396,28 +602,35 @@ async function streamCompletion(model: string, text: string) {
     message_id: createScopedId('message'),
     client_ts: Date.now(),
     stream: true,
+    use_web: useWebSearch.value,
   }
-
-  const res = await fetch(ENDPOINTS.chat, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-
-  if (!res.ok || !res.body) {
-    throw new Error(`Chat request failed: ${res.status}`)
-  }
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
 
   const message = addMessage('bot', '', Date.now())
   message.raw = ''
   message.html = ''
   message.pending = true
+  message.citations = []
+
+  let success = false
+  const collectedCitations = new Map<string, string | undefined>()
 
   try {
+    const res = await fetch(ENDPOINTS.chat, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+
+    if (!res.ok || !res.body) {
+      const status = res.ok ? 'unknown' : String(res.status)
+      throw new Error(`Chat request failed: ${status}`)
+    }
+
+    streamInfo.value = DEFAULT_STREAM_INFO
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
     while (true) {
       const { value, done } = await reader.read()
       if (done) break
@@ -432,6 +645,7 @@ async function streamCompletion(model: string, text: string) {
             message?: { content?: string }
             response?: string
           }
+          collectCitationsFromEvent(chunk, collectedCitations)
           if (chunk && typeof chunk.stage === 'string') {
             const info = formatStreamInfo(chunk)
             if (info) {
@@ -442,6 +656,7 @@ async function streamCompletion(model: string, text: string) {
               message.pending = false
               message.raw = chunk.content
               message.html = sanitizeMarkdown(message.raw)
+              applyCitations(message, collectedCitations)
               await nextTick()
               scrollToBottom()
             }
@@ -450,12 +665,15 @@ async function streamCompletion(model: string, text: string) {
               message.pending = false
               message.raw = `Error: ${errorText}`
               message.html = sanitizeMarkdown(message.raw)
+              message.citations = []
               await nextTick()
               scrollToBottom()
             }
             if (chunk.done) {
               message.pending = false
-              return
+              applyCitations(message, collectedCitations)
+              success = message.raw.length > 0
+              return success
             }
             continue
           }
@@ -478,7 +696,9 @@ async function streamCompletion(model: string, text: string) {
           }
           if (chunk?.done) {
             message.pending = false
-            return
+            applyCitations(message, collectedCitations)
+            success = message.raw.length > 0
+            return success
           }
         } catch {
           message.raw += '\n[Stream parse error]'
@@ -486,6 +706,17 @@ async function streamCompletion(model: string, text: string) {
         }
       }
     }
+
+    success = message.raw.length > 0
+    applyCitations(message, collectedCitations)
+    return success
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : 'Chat request failed.'
+    message.pending = false
+    message.raw = `Error: ${messageText}`
+    message.html = sanitizeMarkdown(message.raw)
+    message.citations = []
+    return false
   } finally {
     message.pending = false
   }
@@ -504,10 +735,10 @@ async function handleSubmit() {
 
   busy.value = true
   try {
-    await streamCompletion(selectedModel.value, text)
-    scheduleHistoryRefresh()
-  } catch (err) {
-    addMessage('bot', `Error: ${(err as Error).message}`)
+    const ok = await streamCompletion(selectedModel.value, text)
+    if (ok) {
+      scheduleHistoryRefresh()
+    }
   } finally {
     busy.value = false
     streamInfo.value = ''
@@ -515,6 +746,7 @@ async function handleSubmit() {
 }
 
 onMounted(loadModelPreference)
+onMounted(loadWebSearchPreference)
 onMounted(loadModels)
 onMounted(startServerHealthPolling)
 onBeforeUnmount(() => {
@@ -617,6 +849,72 @@ onBeforeUnmount(() => {
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .prompt-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .web-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: #d7e2f4;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+  }
+
+  .web-toggle:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .web-toggle[aria-pressed='true'] {
+    border-color: rgba(79, 167, 255, 0.6);
+    background: rgba(79, 167, 255, 0.18);
+    color: #f4f8ff;
+  }
+
+  .web-toggle-track {
+    position: relative;
+    width: 34px;
+    height: 18px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.4);
+    box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.35);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .web-toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    box-shadow: 0 2px 6px rgba(5, 8, 16, 0.35);
+    transition: transform 0.2s ease, background 0.2s ease;
+  }
+
+  .web-toggle[aria-pressed='true'] .web-toggle-track {
+    background: rgba(56, 189, 248, 0.5);
+    box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.6);
+  }
+
+  .web-toggle[aria-pressed='true'] .web-toggle-knob {
+    transform: translateX(16px);
+    background: #f8fafc;
   }
 
   .prompt {
