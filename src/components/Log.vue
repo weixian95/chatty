@@ -6,7 +6,22 @@
       class="message"
       :class="message.role"
     >
-      <div class="message-body" v-html="message.html"></div>
+      <div class="message-body">
+        <div v-if="message.html" v-html="message.html"></div>
+        <div
+          v-else-if="message.pending"
+          class="typing-indicator"
+          aria-live="polite"
+          role="status"
+        >
+          <div class="loading-dots" aria-hidden="true">
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+          </div>
+          <div v-if="streamInfo" class="loading-text">{{ streamInfo }}</div>
+        </div>
+      </div>
       <div class="message-time">{{ formatTimestamp(message.ts) }}</div>
     </div>
   </div>
@@ -20,9 +35,10 @@ type ChatMessage = {
   role: 'user' | 'bot'
   html: string
   ts?: number | null
+  pending?: boolean
 }
 
-defineProps<{ messages: ChatMessage[] }>()
+defineProps<{ messages: ChatMessage[]; streamInfo?: string }>()
 
 const logRef = ref<HTMLDivElement | null>(null)
 
@@ -105,5 +121,53 @@ defineExpose({ scrollToBottom })
   font-size: 0.72rem;
   color: rgba(231, 237, 247, 0.7);
   text-align: right;
+}
+
+.typing-indicator {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.loading-dots {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.loading-text {
+  font-size: 0.72rem;
+  color: rgba(231, 237, 247, 0.78);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.loading-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9ecbff;
+  opacity: 0.4;
+  animation: loadingPulse 1.2s infinite ease-in-out;
+}
+
+.loading-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.loading-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes loadingPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
 }
 </style>

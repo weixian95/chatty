@@ -10,17 +10,16 @@
       @open="handleOpenConversation"
     />
     <div class="chat-view">
-      <header>Chatty</header>
-      <div class="log-container">
-        <Log ref="logRef" :messages="messages" />
-        <div v-if="busy" class="chat-loading" aria-live="polite">
-          <div class="loading-dots" aria-hidden="true">
-            <span class="loading-dot"></span>
-            <span class="loading-dot"></span>
-            <span class="loading-dot"></span>
-          </div>
-          <div v-if="streamInfo" class="loading-text">{{ streamInfo }}</div>
+      <header>
+        <div class="brand">Chatty</div>
+        <div class="server-status" :data-state="serverStatus" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-label">{{ serverName }}</span>
+          <span class="status-text">{{ serverStatusLabel }}</span>
         </div>
+      </header>
+      <div class="log-container">
+        <Log ref="logRef" :messages="messages" :stream-info="streamInfo" />
       </div>
       <div class="prompt-input">
         <ModelSelector
@@ -40,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import Log from './Log.vue'
@@ -49,10 +48,12 @@ import PromptInput from './PromptInput.vue'
 import ModelSelector from './ModelSelector/ModelSelector.vue'
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || 'http://localhost:3000'
+const SERVER_NAME = (import.meta.env.VITE_SERVER_NAME as string | undefined) || 'Server'
 const ENDPOINTS = {
   tags: `${API_BASE}/api/tags`,
   models: `${API_BASE}/api/models`,
   chat: `${API_BASE}/api/chat`,
+  health: `${API_BASE}/health`,
 }
 const USER_STORAGE_KEY = 'chatty-user-id-v1'
 const MODEL_STORAGE_KEY = 'chatty-selected-model-v1'
@@ -68,6 +69,7 @@ type Message = {
   raw: string
   html: string
   ts: number | null
+  pending?: boolean
 }
 
 type StoredMessage = {
@@ -96,6 +98,24 @@ const historyRefreshTimer = ref<number | null>(null)
 const streamInfo = ref('')
 const DEFAULT_STREAM_INFO = 'Contacting model...'
 const STREAMING_INFO = 'Generating response...'
+const serverStatus = ref<'pending' | 'online' | 'offline'>('pending')
+const serverName = ref(SERVER_NAME)
+const serverStatusLabel = computed(() => {
+  switch (serverStatus.value) {
+    case 'online':
+      return 'online'
+    case 'offline':
+      return 'offline'
+    default:
+      return 'checking'
+  }
+})
+const HEALTH_BASE_DELAY = 2000
+const HEALTH_MAX_DELAY = 30000
+const HEALTH_SUCCESS_INTERVAL = 15000
+const MAX_HEALTH_ATTEMPTS = 3
+let serverStatusTimer: number | null = null
+let serverStatusAttempts = 0
 
 const canSend = computed(() => !busy.value && prompt.value.trim().length > 0)
 
@@ -166,6 +186,7 @@ function addMessage(role: Message['role'], text: string, ts?: number | null) {
     raw: text,
     html: sanitizeMarkdown(text),
     ts: ts ?? Date.now(),
+    pending: false,
   })
   messages.value.push(message)
   nextTick(scrollToBottom)
@@ -268,6 +289,52 @@ function formatStreamInfo(event: StreamEvent) {
   }
 }
 
+function clearServerHealthTimer() {
+  if (serverStatusTimer !== null) {
+    window.clearTimeout(serverStatusTimer)
+    serverStatusTimer = null
+  }
+}
+
+function scheduleServerHealthCheck(delayMs: number) {
+  clearServerHealthTimer()
+  serverStatusTimer = window.setTimeout(() => {
+    void runServerHealthCheck()
+  }, delayMs)
+}
+
+async function runServerHealthCheck() {
+  try {
+    const res = await fetch(ENDPOINTS.health, { cache: 'no-store' })
+    if (!res.ok) {
+      throw new Error('Health check failed.')
+    }
+    serverStatus.value = 'online'
+    serverStatusAttempts = 0
+    scheduleServerHealthCheck(HEALTH_SUCCESS_INTERVAL)
+  } catch {
+    serverStatusAttempts += 1
+    if (serverStatusAttempts >= MAX_HEALTH_ATTEMPTS) {
+      serverStatus.value = 'offline'
+      scheduleServerHealthCheck(HEALTH_MAX_DELAY)
+      return
+    }
+    serverStatus.value = 'pending'
+    const backoff = Math.min(
+      HEALTH_BASE_DELAY * 2 ** Math.max(0, serverStatusAttempts - 1),
+      HEALTH_MAX_DELAY,
+    )
+    scheduleServerHealthCheck(backoff)
+  }
+}
+
+function startServerHealthPolling() {
+  serverStatus.value = 'pending'
+  serverStatusAttempts = 0
+  clearServerHealthTimer()
+  void runServerHealthCheck()
+}
+
 function loadModelPreference() {
   try {
     const stored = localStorage.getItem(MODEL_STORAGE_KEY)
@@ -348,65 +415,79 @@ async function streamCompletion(model: string, text: string) {
   const message = addMessage('bot', '', Date.now())
   message.raw = ''
   message.html = ''
+  message.pending = true
 
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
 
-    for (const line of lines) {
-      if (!line.trim()) continue
-      try {
-        const chunk = JSON.parse(line) as StreamEvent & {
-          message?: { content?: string }
-          response?: string
-        }
-        if (chunk && typeof chunk.stage === 'string') {
-          const info = formatStreamInfo(chunk)
-          if (info) {
-            streamInfo.value = info
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const chunk = JSON.parse(line) as StreamEvent & {
+            message?: { content?: string }
+            response?: string
           }
-          if (chunk.stage === 'final_answer' && typeof chunk.content === 'string') {
-            streamInfo.value = ''
-            message.raw = chunk.content
+          if (chunk && typeof chunk.stage === 'string') {
+            const info = formatStreamInfo(chunk)
+            if (info) {
+              streamInfo.value = info
+            }
+            if (chunk.stage === 'final_answer' && typeof chunk.content === 'string') {
+              streamInfo.value = ''
+              message.pending = false
+              message.raw = chunk.content
+              message.html = sanitizeMarkdown(message.raw)
+              await nextTick()
+              scrollToBottom()
+            }
+            if (chunk.stage === 'error') {
+              const errorText = typeof chunk.error === 'string' ? chunk.error : 'Web agent error.'
+              message.pending = false
+              message.raw = `Error: ${errorText}`
+              message.html = sanitizeMarkdown(message.raw)
+              await nextTick()
+              scrollToBottom()
+            }
+            if (chunk.done) {
+              message.pending = false
+              return
+            }
+            continue
+          }
+
+          const content =
+            typeof chunk?.message?.content === 'string'
+              ? chunk.message.content
+              : typeof chunk?.response === 'string'
+                ? chunk.response
+                : ''
+          if (content) {
+            if (!streamInfo.value || streamInfo.value === DEFAULT_STREAM_INFO) {
+              streamInfo.value = STREAMING_INFO
+            }
+            message.pending = false
+            message.raw += content
             message.html = sanitizeMarkdown(message.raw)
             await nextTick()
             scrollToBottom()
           }
-          if (chunk.stage === 'error') {
-            const errorText = typeof chunk.error === 'string' ? chunk.error : 'Web agent error.'
-            message.raw = `Error: ${errorText}`
-            message.html = sanitizeMarkdown(message.raw)
-            await nextTick()
-            scrollToBottom()
+          if (chunk?.done) {
+            message.pending = false
+            return
           }
-          if (chunk.done) return
-          continue
-        }
-
-        const content =
-          typeof chunk?.message?.content === 'string'
-            ? chunk.message.content
-            : typeof chunk?.response === 'string'
-              ? chunk.response
-              : ''
-        if (content) {
-          if (!streamInfo.value || streamInfo.value === DEFAULT_STREAM_INFO) {
-            streamInfo.value = STREAMING_INFO
-          }
-          message.raw += content
+        } catch {
+          message.raw += '\n[Stream parse error]'
           message.html = sanitizeMarkdown(message.raw)
-          await nextTick()
-          scrollToBottom()
         }
-        if (chunk?.done) return
-      } catch {
-        message.raw += '\n[Stream parse error]'
-        message.html = sanitizeMarkdown(message.raw)
       }
     }
+  } finally {
+    message.pending = false
   }
 }
 
@@ -435,6 +516,10 @@ async function handleSubmit() {
 
 onMounted(loadModelPreference)
 onMounted(loadModels)
+onMounted(startServerHealthPolling)
+onBeforeUnmount(() => {
+  clearServerHealthTimer()
+})
 </script>
 
 <style lang="scss">
@@ -454,11 +539,65 @@ onMounted(loadModels)
       height: 64px;
       display: flex;
       align-items: center;
+      justify-content: space-between;
+      gap: 16px;
       padding: 0 24px;
       color: #e7edf7;
       font-weight: 600;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       flex-shrink: 0;
+    }
+
+    .brand {
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+    }
+
+    .server-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.78rem;
+      color: rgba(231, 237, 247, 0.78);
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 6px 10px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #94a3b8;
+      box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.15);
+    }
+
+    .server-status[data-state='online'] .status-dot {
+      background: #22c55e;
+      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+    }
+
+    .server-status[data-state='pending'] .status-dot {
+      background: #facc15;
+      box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.2);
+    }
+
+    .server-status[data-state='offline'] .status-dot {
+      background: #ef4444;
+      box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18);
+    }
+
+    .status-label {
+      letter-spacing: 0.02em;
+    }
+
+    .status-text {
+      text-transform: uppercase;
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      color: rgba(231, 237, 247, 0.6);
     }
   }
 
@@ -478,64 +617,6 @@ onMounted(loadModels)
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-
-  .chat-loading {
-    position: absolute;
-    left: 24px;
-    bottom: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    align-items: flex-start;
-    padding: 8px 12px;
-    border-radius: 12px;
-    background: rgba(8, 12, 20, 0.7);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-    max-width: min(420px, 70vw);
-  }
-
-  .loading-dots {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-
-  .loading-text {
-    font-size: 0.72rem;
-    color: rgba(231, 237, 247, 0.78);
-    line-height: 1.4;
-    word-break: break-word;
-  }
-
-  .loading-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #9ecbff;
-    opacity: 0.4;
-    animation: loadingPulse 1.2s infinite ease-in-out;
-  }
-
-  .loading-dot:nth-child(2) {
-    animation-delay: 0.2s;
-  }
-
-  .loading-dot:nth-child(3) {
-    animation-delay: 0.4s;
-  }
-
-  @keyframes loadingPulse {
-    0%,
-    100% {
-      opacity: 0.35;
-      transform: translateY(0);
-    }
-    50% {
-      opacity: 1;
-      transform: translateY(-3px);
-    }
   }
 
   .prompt {
