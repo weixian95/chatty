@@ -14,9 +14,12 @@
       <div class="log-container">
         <Log ref="logRef" :messages="messages" />
         <div v-if="busy" class="chat-loading" aria-live="polite">
-          <span class="loading-dot"></span>
-          <span class="loading-dot"></span>
-          <span class="loading-dot"></span>
+          <div class="loading-dots" aria-hidden="true">
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+          </div>
+          <div v-if="streamInfo" class="loading-text">{{ streamInfo }}</div>
         </div>
       </div>
       <div class="prompt-input">
@@ -90,6 +93,9 @@ const historyRef = ref<HistoryPanelExpose | null>(null)
 const logRef = ref<InstanceType<typeof Log> | null>(null)
 const messages = ref<Message[]>([])
 const historyRefreshTimer = ref<number | null>(null)
+const streamInfo = ref('')
+const DEFAULT_STREAM_INFO = 'Contacting model...'
+const STREAMING_INFO = 'Generating response...'
 
 const canSend = computed(() => !busy.value && prompt.value.trim().length > 0)
 
@@ -176,6 +182,92 @@ function hydrateMessages(source: StoredMessage[]) {
   }))
 }
 
+type StreamEvent = {
+  stage?: string
+  content?: string
+  query?: string
+  freshness?: string
+  items?: Array<{ title?: string; source?: string }>
+  count?: number
+  with_content?: number
+  error?: string
+  done?: boolean
+}
+
+function normalizeStreamText(value?: string, limit = 160) {
+  if (!value) return ''
+  const cleaned = value.replace(/\s+/g, ' ').trim()
+  if (cleaned.length <= limit) return cleaned
+  return `${cleaned.slice(0, Math.max(0, limit - 3))}...`
+}
+
+function formatFreshness(value?: string) {
+  switch (value) {
+    case 'pd':
+      return 'past day'
+    case 'pw':
+      return 'past week'
+    case 'pm':
+      return 'past month'
+    case 'py':
+      return 'past year'
+    default:
+      return ''
+  }
+}
+
+function formatStreamInfo(event: StreamEvent) {
+  const stage = event.stage
+  if (!stage) return ''
+  switch (stage) {
+    case 'digest_prompt': {
+      const content = normalizeStreamText(event.content, 120)
+      return content ? `Digest: ${content}` : 'Digesting prompt...'
+    }
+    case 'search_started': {
+      const query = normalizeStreamText(event.query, 120)
+      const freshness = formatFreshness(event.freshness)
+      if (query && freshness) return `Searching (${freshness}): ${query}`
+      if (query) return `Searching: ${query}`
+      return 'Searching the web...'
+    }
+    case 'search_summary': {
+      const items = Array.isArray(event.items) ? event.items : []
+      if (!items.length) return 'Search complete. No sources found.'
+      const summary = items
+        .slice(0, 3)
+        .map((item) => {
+          const title = normalizeStreamText(item.title, 80) || 'Untitled'
+          return item.source ? `${title} (${item.source})` : title
+        })
+        .join(' | ')
+      return `Sources: ${summary}`
+    }
+    case 'fetch_started':
+      return typeof event.count === 'number'
+        ? `Fetching ${event.count} sources...`
+        : 'Fetching sources...'
+    case 'fetch_complete':
+      if (typeof event.count === 'number' && typeof event.with_content === 'number') {
+        return `Fetched ${event.with_content}/${event.count} sources.`
+      }
+      if (typeof event.count === 'number') return `Fetched ${event.count} sources.`
+      return 'Sources fetched.'
+    case 'analysis': {
+      const content = normalizeStreamText(event.content, 140)
+      return content || 'Analyzing sources...'
+    }
+    case 'final_answer':
+      return ''
+    case 'error': {
+      const content = normalizeStreamText(event.error, 160)
+      return content ? `Web agent error: ${content}` : 'Web agent error.'
+    }
+    default:
+      return 'Working...'
+  }
+}
+
 function loadModelPreference() {
   try {
     const stored = localStorage.getItem(MODEL_STORAGE_KEY)
@@ -228,6 +320,7 @@ async function loadModels() {
 }
 
 async function streamCompletion(model: string, text: string) {
+  streamInfo.value = DEFAULT_STREAM_INFO
   const payload = {
     user_id: userId.value,
     chat_id: currentChatId.value,
@@ -266,7 +359,33 @@ async function streamCompletion(model: string, text: string) {
     for (const line of lines) {
       if (!line.trim()) continue
       try {
-        const chunk = JSON.parse(line)
+        const chunk = JSON.parse(line) as StreamEvent & {
+          message?: { content?: string }
+          response?: string
+        }
+        if (chunk && typeof chunk.stage === 'string') {
+          const info = formatStreamInfo(chunk)
+          if (info) {
+            streamInfo.value = info
+          }
+          if (chunk.stage === 'final_answer' && typeof chunk.content === 'string') {
+            streamInfo.value = ''
+            message.raw = chunk.content
+            message.html = sanitizeMarkdown(message.raw)
+            await nextTick()
+            scrollToBottom()
+          }
+          if (chunk.stage === 'error') {
+            const errorText = typeof chunk.error === 'string' ? chunk.error : 'Web agent error.'
+            message.raw = `Error: ${errorText}`
+            message.html = sanitizeMarkdown(message.raw)
+            await nextTick()
+            scrollToBottom()
+          }
+          if (chunk.done) return
+          continue
+        }
+
         const content =
           typeof chunk?.message?.content === 'string'
             ? chunk.message.content
@@ -274,6 +393,9 @@ async function streamCompletion(model: string, text: string) {
               ? chunk.response
               : ''
         if (content) {
+          if (!streamInfo.value || streamInfo.value === DEFAULT_STREAM_INFO) {
+            streamInfo.value = STREAMING_INFO
+          }
           message.raw += content
           message.html = sanitizeMarkdown(message.raw)
           await nextTick()
@@ -307,6 +429,7 @@ async function handleSubmit() {
     addMessage('bot', `Error: ${(err as Error).message}`)
   } finally {
     busy.value = false
+    streamInfo.value = ''
   }
 }
 
@@ -362,13 +485,28 @@ onMounted(loadModels)
     left: 24px;
     bottom: 16px;
     display: flex;
-    gap: 6px;
-    align-items: center;
-    padding: 6px 10px;
-    border-radius: 999px;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+    padding: 8px 12px;
+    border-radius: 12px;
     background: rgba(8, 12, 20, 0.7);
     border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    max-width: min(420px, 70vw);
+  }
+
+  .loading-dots {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .loading-text {
+    font-size: 0.72rem;
+    color: rgba(231, 237, 247, 0.78);
+    line-height: 1.4;
+    word-break: break-word;
   }
 
   .loading-dot {
