@@ -4,9 +4,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -28,7 +25,8 @@ jobs:
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
+          personal_token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
+          external_repository: weixian95/weixian95.github.io
+          publish_branch: main
           publish_dir: dist
           destination_dir: tools/chatty
