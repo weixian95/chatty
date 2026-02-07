@@ -14,8 +14,9 @@
         <div class="brand">Chatty</div>
         <div class="server-status" :data-state="serverStatus" aria-live="polite">
           <span class="status-dot" aria-hidden="true"></span>
-          <span class="status-label">{{ serverName }}</span>
-          <span class="status-text">{{ serverStatusLabel }}</span>
+          <span v-if="serverStatusAlert" class="status-alert">{{ serverStatusAlert }}</span>
+          <span v-else class="status-label">{{ serverName }}</span>
+          <span v-if="!serverStatusAlert" class="status-text">{{ serverStatusLabel }}</span>
         </div>
       </header>
       <div class="log-container">
@@ -62,7 +63,7 @@ import PromptInput from './PromptInput.vue'
 import ModelSelector from './ModelSelector/ModelSelector.vue'
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || 'http://localhost:3000'
-const SERVER_NAME = (import.meta.env.VITE_SERVER_NAME as string | undefined) || 'Server'
+const SERVER_NAME = 'Brain at home'
 const ENDPOINTS = {
   tags: `${API_BASE}/api/tags`,
   models: `${API_BASE}/api/models`,
@@ -127,6 +128,10 @@ const serverStatusLabel = computed(() => {
     default:
       return 'checking'
   }
+})
+const serverStatusAlert = computed(() => {
+  if (serverStatus.value !== 'offline') return ''
+  return 'Server offline or not on Tailnet.'
 })
 const HEALTH_BASE_DELAY = 2000
 const HEALTH_MAX_DELAY = 30000
@@ -586,7 +591,6 @@ async function loadModels() {
     }
   } catch (err) {
     models.value = []
-    addMessage('bot', `Model list error: ${(err as Error).message}`)
   } finally {
     loadingModels.value = false
   }
@@ -795,7 +799,7 @@ onBeforeUnmount(() => {
       border: 1px solid rgba(255, 255, 255, 0.08);
       padding: 6px 10px;
       border-radius: 999px;
-      white-space: nowrap;
+      flex-wrap: wrap;
     }
 
     .status-dot {
@@ -830,6 +834,11 @@ onBeforeUnmount(() => {
       font-size: 0.68rem;
       letter-spacing: 0.08em;
       color: rgba(231, 237, 247, 0.6);
+    }
+
+    .status-alert {
+      font-size: 0.72rem;
+      color: rgba(255, 215, 209, 0.9);
     }
   }
 

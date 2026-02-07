@@ -151,17 +151,6 @@ const conversationItems = computed<ConversationItem[]>(() => {
     ]
   }
 
-  if (errorMessage.value) {
-    return [
-      {
-        chatId: 'error',
-        title: errorMessage.value,
-        timestamp: '--',
-        disabled: true,
-      },
-    ]
-  }
-
   if (conversations.value.length === 0) {
     return [
       {
@@ -351,7 +340,7 @@ async function fetchChatList(options: { showLoading?: boolean } = {}) {
     }
   } catch (err) {
     conversations.value = []
-    errorMessage.value = `Chat list error: ${(err as Error).message}`
+    errorMessage.value = ''
   } finally {
     if (showLoading) {
       isLoading.value = false
