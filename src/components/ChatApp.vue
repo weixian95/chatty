@@ -817,6 +817,16 @@ watch(
   },
 )
 
+watch(
+  () => serverStatus.value,
+  (next, prev) => {
+    if (next === 'online' && prev !== 'online') {
+      loadModels()
+      scheduleHistoryRefresh()
+    }
+  },
+)
+
 function toggleWebSearch() {
   useWebSearch.value = !useWebSearch.value
 }
