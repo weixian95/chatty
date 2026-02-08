@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-settings-panel" :class="{ collapsed: isCollapsed }">
+  <div ref="panelRef" class="chat-settings-panel" :class="{ collapsed: isCollapsed }">
     <div class="sidebar-header">
         <button class="icon-button" type="button" @click="toggleSidebar">
           {{ isCollapsed ? '>' : 'Menu' }}
@@ -46,12 +46,7 @@
     </div>
   </div>
   <teleport to="body">
-    <div
-      v-if="props.isMobile && !isCollapsed"
-      class="panel-backdrop"
-      role="presentation"
-      @click="collapseSidebar"
-    ></div>
+    <div v-if="props.isMobile && !isCollapsed" class="panel-backdrop" aria-hidden="true"></div>
   </teleport>
   <teleport to="body">
     <div
@@ -183,6 +178,7 @@ const emit = defineEmits<{
   (event: 'open', payload: { chatId: string; messages: MessageLike[] }): void
 }>()
 
+const panelRef = ref<HTMLElement | null>(null)
 const conversations = ref<Conversation[]>([])
 const isCollapsed = ref(false)
 const isLoading = ref(false)
@@ -205,6 +201,15 @@ const handleDeleteKeydown = (event: KeyboardEvent) => {
   if (removeAllDialogOpen.value && !removeAllBusy.value) {
     closeRemoveAllDialog()
   }
+}
+
+const handleDocumentPointer = (event: PointerEvent) => {
+  if (!props.isMobile || isCollapsed.value) return
+  if (deleteDialogOpen.value || removeAllDialogOpen.value) return
+  const target = event.target as Node | null
+  const panel = panelRef.value
+  if (panel && target && panel.contains(target)) return
+  isCollapsed.value = true
 }
 
 const conversationItems = computed<ConversationItem[]>(() => {
@@ -572,9 +577,11 @@ onMounted(() => {
     isCollapsed.value = true
   }
   window.addEventListener('keydown', handleDeleteKeydown)
+  document.addEventListener('pointerdown', handleDocumentPointer)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleDeleteKeydown)
+  document.removeEventListener('pointerdown', handleDocumentPointer)
 })
 watch(() => props.userId, () => {
   clearPendingRefresh()
@@ -803,6 +810,7 @@ defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
   inset: 0;
   background: rgba(6, 8, 14, 0.2);
   z-index: 1;
+  pointer-events: none;
 }
 
 .delete-overlay {
