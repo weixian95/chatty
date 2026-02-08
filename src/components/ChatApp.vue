@@ -12,14 +12,22 @@
     />
     <div class="chat-view">
       <header>
-        <div class="brand">Chatty</div>
-        <div class="server-status" :data-state="serverStatus" aria-live="polite">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span v-if="serverStatusAlert" class="status-alert">{{ serverStatusAlert }}</span>
-          <span v-else class="status-label">{{ serverName }}</span>
-          <span v-if="!serverStatusAlert" class="status-text">{{ serverStatusLabel }}</span>
+        <div class="header-left">
+          <div class="brand">Chatty</div>
+        </div>
+        <div class="header-right">
+          <div class="server-status" :data-state="serverStatus" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span v-if="serverStatusAlert" class="status-alert">{{ serverStatusAlert }}</span>
+            <span v-else class="status-label">{{ serverName }}</span>
+            <span v-if="!serverStatusAlert" class="status-text">{{ serverStatusLabel }}</span>
+          </div>
         </div>
       </header>
+      <div v-if="currentTopic" class="topic-bar" title="Latest discussion">
+        <span class="topic-label">Latest discussion:</span>
+        <span class="topic-text">{{ currentTopic }}</span>
+      </div>
       <div class="log-container">
         <Log ref="logRef" :messages="messages" :stream-info="streamInfo" />
       </div>
@@ -56,7 +64,17 @@
         <form class="prompt" @submit.prevent="handleSubmit">
           <div class="prompt-field">
             <PromptInput v-model="prompt" :disabled="busy" @submit="handleSubmit" />
-            <button class="primary send-inside" type="submit" :disabled="busy">Send</button>
+            <button
+              v-if="busy"
+              class="primary send-inside cancel-inside"
+              type="button"
+              :disabled="!busy"
+              @click="cancelActiveRequest"
+              aria-label="Cancel"
+            >
+              <span class="cancel-square" aria-hidden="true"></span>
+            </button>
+            <button v-else class="primary send-inside" type="submit" :disabled="busy">Send</button>
           </div>
         </form>
       </div>
@@ -109,6 +127,7 @@ type StoredMessage = {
 
 type HistoryPanelExpose = {
   refreshList: () => void
+  applyChatInfoUpdate: (update: ChatInfoUpdate) => void
 }
 
 const models = ref<string[]>([])
@@ -123,11 +142,24 @@ const useWebSearch = ref(false)
 const historyRef = ref<HistoryPanelExpose | null>(null)
 const logRef = ref<InstanceType<typeof Log> | null>(null)
 const messages = ref<Message[]>([])
+const activeAbort = ref<AbortController | null>(null)
+const activeMessageId = ref<string | null>(null)
 const historyRefreshTimer = ref<number | null>(null)
 const streamInfo = ref('')
+const currentTopic = ref('')
+const currentTopicTs = ref<number | null>(null)
+const currentChatLastMessageTs = ref<number | null>(null)
+const metaRefreshTimer = ref<number | null>(null)
+const metaRefreshAttempts = ref(0)
+const chatInfoSource = ref<EventSource | null>(null)
+const chatInfoReconnectTimer = ref<number | null>(null)
+const chatInfoRetryMs = ref(1000)
+const CHAT_INFO_RETRY_MAX = 30000
 const STRATEGY_STREAM_INFO = 'Deciding information sources...'
 const DEFAULT_STREAM_INFO = 'Contacting model...'
 const STREAMING_INFO = 'Generating response...'
+const META_REFRESH_BASE_DELAY = 1200
+const META_REFRESH_MAX_ATTEMPTS = 6
 const MOBILE_BREAKPOINT = 774
 const serverStatus = ref<'pending' | 'online' | 'offline'>('pending')
 const serverName = ref(SERVER_NAME)
@@ -196,18 +228,160 @@ function scheduleHistoryRefresh() {
   }, 800)
 }
 
+function clearMetaRefresh() {
+  if (metaRefreshTimer.value !== null) {
+    window.clearTimeout(metaRefreshTimer.value)
+    metaRefreshTimer.value = null
+  }
+  metaRefreshAttempts.value = 0
+}
+
+function buildChatMetaUrl(chatId: string) {
+  const url = new URL(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}`)
+  url.searchParams.set('user_id', userId.value)
+  return url.toString()
+}
+
+function buildChatInfoStreamUrl(chatId: string) {
+  const url = new URL(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/stream`)
+  url.searchParams.set('user_id', userId.value)
+  return url.toString()
+}
+
+function closeChatInfoStream() {
+  if (chatInfoReconnectTimer.value !== null) {
+    window.clearTimeout(chatInfoReconnectTimer.value)
+    chatInfoReconnectTimer.value = null
+  }
+  chatInfoRetryMs.value = 1000
+  if (chatInfoSource.value) {
+    chatInfoSource.value.close()
+    chatInfoSource.value = null
+  }
+}
+
+function handleChatInfoUpdate(update: ChatInfoUpdate) {
+  if (!update || typeof update.chat_id !== 'string') return
+  if (update.type === 'topic' && update.content?.topic) {
+    if (update.chat_id === currentChatId.value) {
+      currentTopic.value = update.content.topic
+      if (typeof update.content.ts === 'number') {
+        currentTopicTs.value = normalizeTimestamp(update.content.ts)
+      }
+    }
+  }
+  if (update.type === 'title') {
+    historyRef.value?.applyChatInfoUpdate(update)
+  }
+}
+
+function scheduleChatInfoReconnect(chatId: string) {
+  if (chatInfoReconnectTimer.value !== null) return
+  const delay = chatInfoRetryMs.value
+  chatInfoReconnectTimer.value = window.setTimeout(() => {
+    chatInfoReconnectTimer.value = null
+    openChatInfoStream(chatId, true)
+  }, delay)
+  chatInfoRetryMs.value = Math.min(chatInfoRetryMs.value * 2, CHAT_INFO_RETRY_MAX)
+}
+
+function openChatInfoStream(chatId: string, isRetry = false) {
+  if (!chatId || !userId.value || !API_BASE) return
+  if (!isRetry) {
+    closeChatInfoStream()
+  }
+  try {
+    const source = new EventSource(buildChatInfoStreamUrl(chatId))
+    source.addEventListener('chatinfoupdate', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as ChatInfoUpdate
+        handleChatInfoUpdate(data)
+      } catch {
+        // Ignore malformed updates.
+      }
+    })
+    source.addEventListener('error', () => {
+      if (source.readyState === EventSource.CLOSED) {
+        scheduleChatInfoReconnect(chatId)
+      }
+    })
+    source.addEventListener('open', () => {
+      chatInfoRetryMs.value = 1000
+      if (chatInfoReconnectTimer.value !== null) {
+        window.clearTimeout(chatInfoReconnectTimer.value)
+        chatInfoReconnectTimer.value = null
+      }
+    })
+    chatInfoSource.value = source
+  } catch {
+    // Ignore EventSource setup errors.
+    scheduleChatInfoReconnect(chatId)
+  }
+}
+
+function shouldPollTopic(lastMessageTs: number | null, lastTopicTs: number | null) {
+  if (!lastMessageTs) return false
+  if (!lastTopicTs) return true
+  return lastTopicTs < lastMessageTs
+}
+
+async function fetchChatMeta(chatId: string) {
+  if (!chatId) return
+  try {
+    const res = await fetch(buildChatMetaUrl(chatId), { cache: 'no-store' })
+    if (!res.ok) return
+    const data = await res.json()
+    currentTopic.value = typeof data.topic === 'string' ? data.topic : ''
+    currentTopicTs.value = normalizeTimestamp(data.last_topic_ts)
+    currentChatLastMessageTs.value = normalizeTimestamp(
+      data.last_message_ts ?? data.last_updated_ts
+    )
+    return shouldPollTopic(currentChatLastMessageTs.value, currentTopicTs.value)
+  } catch {
+    // Ignore errors.
+  }
+  return false
+}
+
+function scheduleMetaRefresh(chatId: string) {
+  clearMetaRefresh()
+  const poll = async () => {
+    if (metaRefreshAttempts.value >= META_REFRESH_MAX_ATTEMPTS) return
+    metaRefreshAttempts.value += 1
+    const needsMore = await fetchChatMeta(chatId)
+    if (!needsMore) return
+    if (metaRefreshAttempts.value >= META_REFRESH_MAX_ATTEMPTS) return
+    const delay = META_REFRESH_BASE_DELAY * metaRefreshAttempts.value
+    metaRefreshTimer.value = window.setTimeout(() => {
+      void poll()
+    }, delay)
+  }
+  void poll()
+}
+
 function handleClearActiveChat() {
   if (busy.value) return
   messages.value = []
   prompt.value = ''
+  currentTopic.value = ''
+  currentTopicTs.value = null
+  currentChatLastMessageTs.value = null
+  clearMetaRefresh()
   resetChatId()
 }
 
-function handleOpenConversation(payload: { chatId: string; messages: StoredMessage[] }) {
+function handleOpenConversation(payload: {
+  chatId: string
+  messages: StoredMessage[]
+}) {
   messages.value = hydrateMessages(payload.messages)
   currentChatId.value = payload.chatId
   prompt.value = ''
+  currentTopic.value = ''
+  currentTopicTs.value = null
+  currentChatLastMessageTs.value = null
   nextTick(scrollToBottom)
+  scheduleMetaRefresh(payload.chatId)
 }
 
 function sanitizeMarkdown(text: string) {
@@ -234,6 +408,12 @@ function addMessage(role: Message['role'], text: string, ts?: number | null) {
   return message
 }
 
+function removeMessage(id: string) {
+  const index = messages.value.findIndex((message) => message.id === id)
+  if (index === -1) return
+  messages.value.splice(index, 1)
+}
+
 function hydrateMessages(source: StoredMessage[]) {
   return source.map((message) => ({
     id: message.id,
@@ -257,6 +437,8 @@ type StreamCitation =
 type StreamEvent = {
   stage?: string
   content?: string
+  topic?: string
+  ts?: number
   query?: string
   freshness?: string
   items?: Array<{ title?: string; source?: string; url?: string; link?: string }>
@@ -273,11 +455,28 @@ type StreamEvent = {
   done?: boolean
 }
 
+type ChatInfoUpdate = {
+  type?: string
+  chat_id?: string
+  user_id?: string
+  content?: {
+    title?: string
+    topic?: string
+    ts?: number
+  }
+}
+
 function normalizeStreamText(value?: string, limit = 160) {
   if (!value) return ''
   const cleaned = value.replace(/\s+/g, ' ').trim()
   if (cleaned.length <= limit) return cleaned
   return `${cleaned.slice(0, Math.max(0, limit - 3))}...`
+}
+
+function normalizeTimestamp(value: unknown) {
+  const raw = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : NaN
+  if (!Number.isFinite(raw) || raw <= 0) return null
+  return raw < 1_000_000_000_000 ? raw * 1000 : raw
 }
 
 function normalizeUrl(value?: string) {
@@ -472,6 +671,8 @@ function formatStreamInfo(event: StreamEvent) {
       const content = normalizeStreamText(event.content, 140)
       return content || 'Analyzing sources...'
     }
+    case 'topic':
+      return ''
     case 'final_answer':
       return ''
     case 'error': {
@@ -651,8 +852,12 @@ async function streamCompletion(model: string, text: string) {
   message.html = ''
   message.pending = true
   message.citations = []
+  const controller = new AbortController()
+  activeAbort.value = controller
+  activeMessageId.value = message.id
 
   let success = false
+  let sawDone = false
   const collectedCitations = new Map<string, string | undefined>()
 
   try {
@@ -660,6 +865,7 @@ async function streamCompletion(model: string, text: string) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     })
 
     if (!res.ok || !res.body) {
@@ -687,10 +893,17 @@ async function streamCompletion(model: string, text: string) {
             response?: string
           }
           collectCitationsFromEvent(chunk, collectedCitations)
+
           if (chunk && typeof chunk.stage === 'string') {
             const info = formatStreamInfo(chunk)
             if (info) {
               streamInfo.value = info
+            }
+            if (chunk.stage === 'topic' && typeof chunk.topic === 'string') {
+              currentTopic.value = chunk.topic
+              if (typeof chunk.ts === 'number') {
+                currentTopicTs.value = normalizeTimestamp(chunk.ts)
+              }
             }
             if (chunk.stage === 'final_answer' && typeof chunk.content === 'string') {
               streamInfo.value = ''
@@ -711,10 +924,9 @@ async function streamCompletion(model: string, text: string) {
               scrollToBottom()
             }
             if (chunk.done) {
+              sawDone = true
               message.pending = false
               applyCitations(message, collectedCitations)
-              success = message.raw.length > 0
-              return success
             }
             continue
           }
@@ -736,10 +948,9 @@ async function streamCompletion(model: string, text: string) {
             scrollToBottom()
           }
           if (chunk?.done) {
+            sawDone = true
             message.pending = false
             applyCitations(message, collectedCitations)
-            success = message.raw.length > 0
-            return success
           }
         } catch {
           message.raw += '\n[Stream parse error]'
@@ -748,10 +959,17 @@ async function streamCompletion(model: string, text: string) {
       }
     }
 
-    success = message.raw.length > 0
+    success = message.raw.length > 0 || sawDone
     applyCitations(message, collectedCitations)
     return success
   } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      message.pending = false
+      if (!message.raw) {
+        removeMessage(message.id)
+      }
+      return false
+    }
     const messageText = error instanceof Error ? error.message : 'Chat request failed.'
     message.pending = false
     message.raw = `Error: ${messageText}`
@@ -760,7 +978,17 @@ async function streamCompletion(model: string, text: string) {
     return false
   } finally {
     message.pending = false
+    if (activeAbort.value === controller) {
+      activeAbort.value = null
+      activeMessageId.value = null
+    }
   }
+}
+
+function cancelActiveRequest() {
+  if (!activeAbort.value) return
+  activeAbort.value.abort()
+  streamInfo.value = ''
 }
 
 async function handleSubmit() {
@@ -779,6 +1007,7 @@ async function handleSubmit() {
     const ok = await streamCompletion(selectedModel.value, text)
     if (ok) {
       scheduleHistoryRefresh()
+      scheduleMetaRefresh(currentChatId.value)
     }
   } finally {
     busy.value = false
@@ -791,8 +1020,24 @@ onMounted(loadWebSearchPreference)
 onMounted(loadModels)
 onMounted(startServerHealthPolling)
 onMounted(startMobileWidthWatcher)
+onMounted(() => {
+  if (currentChatId.value) {
+    openChatInfoStream(currentChatId.value)
+  }
+})
 onBeforeUnmount(() => {
   clearServerHealthTimer()
+  clearMetaRefresh()
+  closeChatInfoStream()
+  cancelActiveRequest()
+})
+
+watch([currentChatId, userId], ([chatId, nextUserId]) => {
+  if (!chatId || !nextUserId) {
+    closeChatInfoStream()
+    return
+  }
+  openChatInfoStream(chatId)
 })
 </script>
 
@@ -830,6 +1075,55 @@ onBeforeUnmount(() => {
     .brand {
       font-size: 1.05rem;
       letter-spacing: 0.02em;
+      flex: 0 0 auto;
+    }
+
+    .header-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .topic-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      color: rgba(219, 234, 254, 0.7);
+      font-size: 0.78rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(11, 16, 24, 0.35);
+      min-height: 32px;
+    }
+
+    .topic-label {
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: rgba(219, 234, 254, 0.6);
+      flex-shrink: 0;
+      text-transform: uppercase;
+      font-size: 0.6rem;
+    }
+
+    .topic-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @media (min-width: $bp-mobile) {
+      .topic-bar {
+        padding: 6px 24px;
+      }
+    }
+
+    .header-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex: 0 0 auto;
     }
 
     .server-status {
@@ -1013,13 +1307,14 @@ onBeforeUnmount(() => {
   }
 
   .primary {
-    background: linear-gradient(180deg, #6fc3ff, #4fa7ff);
-    color: #0b1320;
+    background: linear-gradient(180deg, rgba(111, 195, 255, 0.85), rgba(79, 167, 255, 0.85));
+    color: rgba(11, 19, 32, 0.9);
     border: none;
     padding: 12px 20px;
     font-weight: 600;
     border-radius: 12px;
     cursor: pointer;
+    box-shadow: 0 6px 16px rgba(10, 16, 26, 0.25);
   }
 
   .primary:disabled {
@@ -1041,7 +1336,26 @@ onBeforeUnmount(() => {
     bottom: 14px;
     height: 40px;
     padding: 0 18px;
-    border-radius: 12px;
+    border-radius: 999px;
+  }
+
+  .cancel-inside {
+    width: 40px;
+    padding: 0;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(148, 163, 184, 0.25);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    color: #cbd5e1;
+  }
+
+  .cancel-square {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    background: rgba(203, 213, 225, 0.85);
   }
 }
 </style>

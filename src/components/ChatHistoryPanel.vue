@@ -25,7 +25,7 @@
                 class="delete-conversation"
                 type="button"
                 title="Delete chat"
-                @click.stop="openDeleteDialog(item.chatId)"
+                @click.stop="handleDeleteConversation(item.chatId)"
               >
                 Delete
               </button>
@@ -34,38 +34,47 @@
           </li>
         </ul>
       </div>
+      <button
+        v-if="!isCollapsed"
+        class="remove-all"
+        type="button"
+        :disabled="props.busy || removeAllBusy || conversations.length === 0"
+        @click="openRemoveAllDialog"
+      >
+        Remove all chats
+      </button>
     </div>
   </div>
   <teleport to="body">
     <div
-      v-if="deleteDialogOpen"
+      v-if="removeAllDialogOpen"
       class="delete-overlay"
       role="presentation"
       @click.self="handleBackdropClick"
     >
       <div class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title">
         <div class="delete-dialog-header">
-          <h3 id="delete-title">Delete chat?</h3>
+          <h3 id="delete-title">Remove all chats?</h3>
           <p class="delete-dialog-subtitle">
-            Delete "<span>{{ deleteTargetTitle }}</span>"? This cannot be undone.
+            This will permanently delete all chat history. This cannot be undone.
           </p>
         </div>
         <div class="delete-dialog-actions">
           <button
             class="dialog-button ghost"
             type="button"
-            :disabled="deleteBusy || props.busy"
-            @click="closeDeleteDialog"
+            :disabled="removeAllBusy || props.busy"
+            @click="closeRemoveAllDialog"
           >
             Cancel
           </button>
           <button
             class="dialog-button danger"
             type="button"
-            :disabled="deleteBusy || props.busy"
-            @click="confirmDeleteConversation"
+            :disabled="removeAllBusy || props.busy"
+            @click="confirmRemoveAll"
           >
-            Delete chat
+            Remove all
           </button>
         </div>
       </div>
@@ -88,13 +97,25 @@ type ChatSummary = {
   title?: string
   chat_title?: string
   summary?: string
+  topic?: string
   last_updated_ts?: number
   last_message_ts?: number
+  raw_count?: number
+}
+
+type ChatInfoUpdate = {
+  type?: string
+  chat_id?: string
+  content?: {
+    title?: string
+    topic?: string
+  }
 }
 
 type Conversation = {
   chatId: string
   title: string
+  topic: string | null
   displayTs: number | null
   sortTs: number | null
 }
@@ -127,13 +148,11 @@ const pendingRefreshTimer = ref<number | null>(null)
 const pendingChatId = ref<string | null>(null)
 const pendingAttempts = ref(0)
 const MAX_PENDING_ATTEMPTS = 6
-const deleteDialogOpen = ref(false)
-const deleteTargetId = ref<string | null>(null)
-const deleteTargetTitle = ref('')
-const deleteBusy = ref(false)
+const removeAllDialogOpen = ref(false)
+const removeAllBusy = ref(false)
 const handleDeleteKeydown = (event: KeyboardEvent) => {
-  if (event.key === 'Escape' && deleteDialogOpen.value && !deleteBusy.value && !props.busy) {
-    closeDeleteDialog()
+  if (event.key === 'Escape' && removeAllDialogOpen.value && !removeAllBusy.value && !props.busy) {
+    closeRemoveAllDialog()
   }
 }
 
@@ -186,26 +205,18 @@ function handleNewChat() {
   emit('clear')
 }
 
-function findConversationTitle(chatId: string) {
-  return conversations.value.find((item) => item.chatId === chatId)?.title ?? fallbackTitle(chatId)
+function openRemoveAllDialog() {
+  if (props.busy || removeAllBusy.value || conversations.value.length === 0) return
+  removeAllDialogOpen.value = true
 }
 
-function openDeleteDialog(chatId: string) {
-  if (isDisabledChatId(chatId) || props.busy) return
-  deleteTargetId.value = chatId
-  deleteTargetTitle.value = findConversationTitle(chatId)
-  deleteDialogOpen.value = true
-}
-
-function closeDeleteDialog() {
-  deleteDialogOpen.value = false
-  deleteTargetId.value = null
-  deleteTargetTitle.value = ''
+function closeRemoveAllDialog() {
+  removeAllDialogOpen.value = false
 }
 
 function handleBackdropClick() {
-  if (deleteBusy.value || props.busy) return
-  closeDeleteDialog()
+  if (removeAllBusy.value || props.busy) return
+  closeRemoveAllDialog()
 }
 
 function isDisabledChatId(id: string) {
@@ -216,6 +227,7 @@ async function handleOpenConversation(id: string) {
   if (isDisabledChatId(id) || props.busy) return
   try {
     const messages = await fetchChatMessages(id)
+    await fetchChatMeta(id)
     emit('open', { chatId: id, messages })
     if (props.isMobile) {
       isCollapsed.value = true
@@ -306,22 +318,35 @@ async function fetchChatList(options: { showLoading?: boolean } = {}) {
     if (!res.ok) throw new Error(`List failed: ${res.status}`)
     const data = await res.json()
     const chats = Array.isArray(data.chats) ? data.chats : []
+    const seen = new Set<string>()
     const existingById = new Map(conversations.value.map((item) => [item.chatId, item]))
     conversations.value = chats
       .map((chat: ChatSummary) => {
         const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
         if (!chatId) return null
+        if (seen.has(chatId)) return null
+        seen.add(chatId)
         const updated = normalizeTimestamp(chat.last_updated_ts ?? chat.last_message_ts)
+        const rawTitle = extractTitle(chat)
+        const rawCount = typeof chat.raw_count === 'number' ? chat.raw_count : null
+        const topic =
+          typeof chat.topic === 'string' && chat.topic.trim().length > 0
+            ? chat.topic.trim()
+            : null
+        if ((!updated && !rawTitle && !topic) || (rawCount !== null && rawCount <= 0)) {
+          return null
+        }
         const existing = existingById.get(chatId)
         const displayTs = updated ?? existing?.displayTs ?? null
         const sortTs =
           updated ??
           existing?.sortTs ??
           (chatId === props.currentChatId ? Date.now() : null)
-        const title = extractTitle(chat) ?? existing?.title ?? fallbackTitle(chatId)
+        const title = rawTitle ?? existing?.title ?? fallbackTitle(chatId)
         return {
           chatId,
           title,
+          topic,
           displayTs,
           sortTs,
         }
@@ -400,10 +425,8 @@ async function fetchChatMessages(chatId: string): Promise<MessageLike[]> {
     .filter((message) => message.raw.trim().length > 0)
 }
 
-async function confirmDeleteConversation() {
-  const chatId = deleteTargetId.value
-  if (!chatId || deleteBusy.value || props.busy) return
-  deleteBusy.value = true
+async function handleDeleteConversation(chatId: string) {
+  if (isDisabledChatId(chatId) || props.busy) return
   try {
     const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
     if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
@@ -414,9 +437,28 @@ async function confirmDeleteConversation() {
     void fetchChatList({ showLoading: false })
   } catch (err) {
     errorMessage.value = `Delete error: ${(err as Error).message}`
+  }
+}
+
+async function confirmRemoveAll() {
+  if (props.busy || removeAllBusy.value) return
+  removeAllBusy.value = true
+  try {
+    const ids = conversations.value.map((item) => item.chatId)
+    for (const chatId of ids) {
+      try {
+        const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
+        if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
+      } catch {
+        // keep going
+      }
+    }
+    conversations.value = []
+    emit('clear')
+    void fetchChatList({ showLoading: false })
   } finally {
-    deleteBusy.value = false
-    closeDeleteDialog()
+    removeAllBusy.value = false
+    closeRemoveAllDialog()
   }
 }
 
@@ -443,8 +485,24 @@ watch(() => props.currentChatId, () => {
   fetchChatList({ showLoading: false })
 })
 
+function applyChatInfoUpdate(update: ChatInfoUpdate) {
+  if (!update || typeof update.chat_id !== 'string') return
+  const chatId = update.chat_id
+  const index = conversations.value.findIndex((item) => item.chatId === chatId)
+  if (index === -1) {
+    void fetchChatList({ showLoading: false })
+    return
+  }
+  const existing = conversations.value[index]
+  if (update.type === 'title' && update.content?.title) {
+    conversations.value.splice(index, 1, {
+      ...existing,
+      title: update.content.title,
+    })
+  }
+}
 
-defineExpose({ refreshList: fetchChatList })
+defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
 </script>
 
 <style lang="scss">
@@ -454,7 +512,8 @@ defineExpose({ refreshList: fetchChatList })
     z-index: 1;
     width: 320px;
     height: 100%;
-    background-color: #0f141c;
+    background: rgba(15, 20, 28, 0.8);
+    backdrop-filter: blur(16px);
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     box-sizing: border-box;
     display: flex;
@@ -464,6 +523,8 @@ defineExpose({ refreshList: fetchChatList })
 
     @media (min-width: $bp-mobile) {
       position: relative;
+      background: #0f141c;
+      backdrop-filter: none;
     }
 
     &.collapsed {
@@ -489,7 +550,7 @@ defineExpose({ refreshList: fetchChatList })
     box-sizing: border-box;
     padding: 16px;
     transition: opacity 0.3s;
-    height: calc(100% - 50px);
+    height: calc(100% - 80px);
   }
 
   .sidebar-header {
@@ -525,6 +586,27 @@ defineExpose({ refreshList: fetchChatList })
     padding: 10px 12px;
     border-radius: 12px;
     cursor: pointer;
+  }
+
+  .remove-all {
+    margin-top: auto;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.12);
+    color: #ffd1cb;
+    font: inherit;
+    padding: 10px 12px;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+
+  .remove-all:hover:not(:disabled) {
+    border-color: rgba(239, 68, 68, 0.6);
+    background: rgba(239, 68, 68, 0.2);
+  }
+
+  .remove-all:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .conversation-list {
