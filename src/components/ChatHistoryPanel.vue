@@ -25,7 +25,7 @@
                 class="delete-conversation"
                 type="button"
                 title="Delete chat"
-                @click.stop="handleDeleteConversation(item.chatId)"
+                @click.stop="openDeleteDialog(item.chatId)"
               >
                 Delete
               </button>
@@ -47,14 +47,57 @@
   </div>
   <teleport to="body">
     <div
-      v-if="removeAllDialogOpen"
+      v-if="props.isMobile && !isCollapsed"
+      class="panel-backdrop"
+      role="presentation"
+      @click="collapseSidebar"
+    ></div>
+  </teleport>
+  <teleport to="body">
+    <div
+      v-if="deleteDialogOpen"
       class="delete-overlay"
       role="presentation"
       @click.self="handleBackdropClick"
     >
       <div class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title">
         <div class="delete-dialog-header">
-          <h3 id="delete-title">Remove all chats?</h3>
+          <h3 id="delete-title">Delete chat?</h3>
+          <p class="delete-dialog-subtitle">
+            Delete "<span>{{ deleteTargetTitle }}</span>"? This cannot be undone.
+          </p>
+        </div>
+        <div class="delete-dialog-actions">
+          <button
+            class="dialog-button ghost"
+            type="button"
+            :disabled="deleteBusy || props.busy"
+            @click="closeDeleteDialog"
+          >
+            Cancel
+          </button>
+          <button
+            class="dialog-button danger"
+            type="button"
+            :disabled="deleteBusy || props.busy"
+            @click="confirmDeleteConversation"
+          >
+            Delete chat
+          </button>
+        </div>
+      </div>
+    </div>
+  </teleport>
+  <teleport to="body">
+    <div
+      v-if="removeAllDialogOpen"
+      class="delete-overlay"
+      role="presentation"
+      @click.self="handleBackdropClick"
+    >
+      <div class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="remove-all-title">
+        <div class="delete-dialog-header">
+          <h3 id="remove-all-title">Remove all chats?</h3>
           <p class="delete-dialog-subtitle">
             This will permanently delete all chat history. This cannot be undone.
           </p>
@@ -150,8 +193,16 @@ const pendingAttempts = ref(0)
 const MAX_PENDING_ATTEMPTS = 6
 const removeAllDialogOpen = ref(false)
 const removeAllBusy = ref(false)
+const deleteDialogOpen = ref(false)
+const deleteTargetId = ref<string | null>(null)
+const deleteTargetTitle = ref('')
+const deleteBusy = ref(false)
 const handleDeleteKeydown = (event: KeyboardEvent) => {
-  if (event.key === 'Escape' && removeAllDialogOpen.value && !removeAllBusy.value && !props.busy) {
+  if (event.key !== 'Escape' || props.busy) return
+  if (deleteDialogOpen.value && !deleteBusy.value) {
+    closeDeleteDialog()
+  }
+  if (removeAllDialogOpen.value && !removeAllBusy.value) {
     closeRemoveAllDialog()
   }
 }
@@ -200,13 +251,29 @@ function toggleSidebar() {
   isCollapsed.value = !isCollapsed.value
 }
 
+function collapseSidebar() {
+  if (props.isMobile) {
+    isCollapsed.value = true
+  }
+}
+
 function handleNewChat() {
   if (props.busy) return
   emit('clear')
+  if (props.isMobile) {
+    isCollapsed.value = true
+  }
+}
+
+function findConversationTitle(chatId: string) {
+  return conversations.value.find((item) => item.chatId === chatId)?.title ?? fallbackTitle(chatId)
 }
 
 function openRemoveAllDialog() {
   if (props.busy || removeAllBusy.value || conversations.value.length === 0) return
+  if (deleteDialogOpen.value) {
+    closeDeleteDialog()
+  }
   removeAllDialogOpen.value = true
 }
 
@@ -215,8 +282,33 @@ function closeRemoveAllDialog() {
 }
 
 function handleBackdropClick() {
-  if (removeAllBusy.value || props.busy) return
-  closeRemoveAllDialog()
+  if (props.busy) return
+  if (deleteDialogOpen.value && !deleteBusy.value) {
+    closeDeleteDialog()
+  }
+  if (removeAllDialogOpen.value && !removeAllBusy.value) {
+    closeRemoveAllDialog()
+  }
+}
+
+function openDeleteDialog(chatId: string) {
+  if (isDisabledChatId(chatId) || props.busy) return
+  if (!props.isMobile) {
+    void handleDeleteConversation(chatId)
+    return
+  }
+  if (removeAllDialogOpen.value) {
+    closeRemoveAllDialog()
+  }
+  deleteTargetId.value = chatId
+  deleteTargetTitle.value = findConversationTitle(chatId)
+  deleteDialogOpen.value = true
+}
+
+function closeDeleteDialog() {
+  deleteDialogOpen.value = false
+  deleteTargetId.value = null
+  deleteTargetTitle.value = ''
 }
 
 function isDisabledChatId(id: string) {
@@ -440,6 +532,18 @@ async function handleDeleteConversation(chatId: string) {
   }
 }
 
+async function confirmDeleteConversation() {
+  const chatId = deleteTargetId.value
+  if (!chatId || deleteBusy.value || props.busy) return
+  deleteBusy.value = true
+  try {
+    await handleDeleteConversation(chatId)
+  } finally {
+    deleteBusy.value = false
+    closeDeleteDialog()
+  }
+}
+
 async function confirmRemoveAll() {
   if (props.busy || removeAllBusy.value) return
   removeAllBusy.value = true
@@ -509,7 +613,7 @@ defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
 .chat {
   .chat-settings-panel {
     position: absolute;
-    z-index: 1;
+    z-index: 2;
     width: 320px;
     height: 100%;
     background: rgba(15, 20, 28, 0.8);
@@ -692,6 +796,13 @@ defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
     font-size: 0.75rem;
   }
 
+}
+
+.panel-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 8, 14, 0.2);
+  z-index: 1;
 }
 
 .delete-overlay {
