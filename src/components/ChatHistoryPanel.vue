@@ -776,7 +776,7 @@ defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
   }
 
   .delete-conversation {
-    opacity: 0;
+    opacity: 1;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(22, 28, 40, 0.65);
     color: #cfd8e6;
@@ -788,9 +788,15 @@ defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
     transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
 
-  .conversation-item:hover .delete-conversation,
-  .conversation-item.active .delete-conversation {
-    opacity: 1;
+  @media (min-width: $bp-mobile) {
+    .delete-conversation {
+      opacity: 0;
+    }
+
+    .conversation-item:hover .delete-conversation,
+    .conversation-item.active .delete-conversation {
+      opacity: 1;
+    }
   }
 
   .delete-conversation:hover {
