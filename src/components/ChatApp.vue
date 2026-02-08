@@ -116,6 +116,7 @@ type Message = {
   ts: number | null
   pending?: boolean
   citations?: Array<{ url: string; title?: string }>
+  polished?: boolean
 }
 
 type StoredMessage = {
@@ -123,6 +124,7 @@ type StoredMessage = {
   role: 'user' | 'bot'
   raw: string
   ts?: number | null
+  polished?: boolean
 }
 
 type HistoryPanelExpose = {
@@ -185,6 +187,7 @@ const serverStatusAlert = computed(() => {
 const HEALTH_BASE_DELAY = 2000
 const HEALTH_MAX_DELAY = 30000
 const HEALTH_SUCCESS_INTERVAL = 15000
+const HEALTH_OFFLINE_INTERVAL = 5000
 const MAX_HEALTH_ATTEMPTS = 3
 let serverStatusTimer: number | null = null
 let serverStatusAttempts = 0
@@ -273,6 +276,25 @@ function handleChatInfoUpdate(update: ChatInfoUpdate) {
   if (update.type === 'title') {
     historyRef.value?.applyChatInfoUpdate(update)
   }
+  if (update.type === 'answer' && update.content?.answer) {
+    if (update.chat_id !== currentChatId.value) return
+    const lastBot = [...messages.value].reverse().find((item) => item.role === 'bot')
+    if (!lastBot) return
+    lastBot.raw = update.content.answer
+    lastBot.html = sanitizeMarkdown(lastBot.raw)
+    lastBot.pending = false
+    if (typeof update.content.polished === 'boolean') {
+      lastBot.polished = update.content.polished
+    } else {
+      lastBot.polished = true
+    }
+    const extracted = extractCitations(lastBot.raw).map((url) => ({ url }))
+    if (extracted.length > 0) {
+      lastBot.citations = extracted
+    } else if (!lastBot.citations || lastBot.citations.length === 0) {
+      lastBot.citations = []
+    }
+  }
 }
 
 function scheduleChatInfoReconnect(chatId: string) {
@@ -310,6 +332,10 @@ function openChatInfoStream(chatId: string, isRetry = false) {
       if (chatInfoReconnectTimer.value !== null) {
         window.clearTimeout(chatInfoReconnectTimer.value)
         chatInfoReconnectTimer.value = null
+      }
+      if (isRetry) {
+        scheduleHistoryRefresh()
+        void loadModels()
       }
     })
     chatInfoSource.value = source
@@ -401,6 +427,7 @@ function addMessage(role: Message['role'], text: string, ts?: number | null) {
     html: sanitizeMarkdown(text),
     ts: ts ?? Date.now(),
     pending: false,
+    polished: role === 'bot' ? false : undefined,
     citations: role === 'bot' ? extractCitations(text).map((url) => ({ url })) : [],
   })
   messages.value.push(message)
@@ -421,6 +448,7 @@ function hydrateMessages(source: StoredMessage[]) {
     raw: message.raw,
     html: sanitizeMarkdown(message.raw),
     ts: typeof message.ts === 'number' ? message.ts : null,
+    polished: typeof message.polished === 'boolean' ? message.polished : undefined,
     citations: extractCitations(message.raw).map((url) => ({ url })),
   }))
 }
@@ -462,6 +490,8 @@ type ChatInfoUpdate = {
   content?: {
     title?: string
     topic?: string
+    answer?: string
+    polished?: boolean
     ts?: number
   }
 }
@@ -699,6 +729,7 @@ function scheduleServerHealthCheck(delayMs: number) {
 }
 
 async function runServerHealthCheck() {
+  const wasOffline = serverStatus.value === 'offline'
   try {
     const res = await fetch(ENDPOINTS.health, { cache: 'no-store' })
     if (!res.ok) {
@@ -708,10 +739,15 @@ async function runServerHealthCheck() {
     serverStatusAttempts = 0
     scheduleServerHealthCheck(HEALTH_SUCCESS_INTERVAL)
   } catch {
+    if (wasOffline) {
+      serverStatus.value = 'offline'
+      scheduleServerHealthCheck(HEALTH_OFFLINE_INTERVAL)
+      return
+    }
     serverStatusAttempts += 1
     if (serverStatusAttempts >= MAX_HEALTH_ATTEMPTS) {
       serverStatus.value = 'offline'
-      scheduleServerHealthCheck(HEALTH_MAX_DELAY)
+      scheduleServerHealthCheck(HEALTH_OFFLINE_INTERVAL)
       return
     }
     serverStatus.value = 'pending'
@@ -807,6 +843,16 @@ watch(
   () => useWebSearch.value,
   () => {
     persistWebSearchPreference()
+  },
+)
+
+watch(
+  () => serverStatus.value,
+  (next, prev) => {
+    if (next === 'online' && prev !== 'online') {
+      loadModels()
+      scheduleHistoryRefresh()
+    }
   },
 )
 
