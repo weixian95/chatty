@@ -185,6 +185,7 @@ const serverStatusAlert = computed(() => {
 const HEALTH_BASE_DELAY = 2000
 const HEALTH_MAX_DELAY = 30000
 const HEALTH_SUCCESS_INTERVAL = 15000
+const HEALTH_OFFLINE_INTERVAL = 5000
 const MAX_HEALTH_ATTEMPTS = 3
 let serverStatusTimer: number | null = null
 let serverStatusAttempts = 0
@@ -699,6 +700,7 @@ function scheduleServerHealthCheck(delayMs: number) {
 }
 
 async function runServerHealthCheck() {
+  const wasOffline = serverStatus.value === 'offline'
   try {
     const res = await fetch(ENDPOINTS.health, { cache: 'no-store' })
     if (!res.ok) {
@@ -708,10 +710,15 @@ async function runServerHealthCheck() {
     serverStatusAttempts = 0
     scheduleServerHealthCheck(HEALTH_SUCCESS_INTERVAL)
   } catch {
+    if (wasOffline) {
+      serverStatus.value = 'offline'
+      scheduleServerHealthCheck(HEALTH_OFFLINE_INTERVAL)
+      return
+    }
     serverStatusAttempts += 1
     if (serverStatusAttempts >= MAX_HEALTH_ATTEMPTS) {
       serverStatus.value = 'offline'
-      scheduleServerHealthCheck(HEALTH_MAX_DELAY)
+      scheduleServerHealthCheck(HEALTH_OFFLINE_INTERVAL)
       return
     }
     serverStatus.value = 'pending'
