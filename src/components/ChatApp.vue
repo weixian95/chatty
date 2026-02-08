@@ -5,7 +5,6 @@
       :current-chat-id="currentChatId"
       :busy="busy"
       :api-base="API_BASE"
-      :user-id="userId"
       :is-mobile="isMobileWidth"
       @clear="handleClearActiveChat"
       @open="handleOpenConversation"
@@ -99,7 +98,6 @@ const ENDPOINTS = {
   chat: `${API_BASE}/api/chat`,
   health: `${API_BASE}/health`,
 }
-const USER_STORAGE_KEY = 'chatty-user-id-v1'
 const MODEL_STORAGE_KEY = 'chatty-selected-model-v1'
 const WEB_SEARCH_STORAGE_KEY = 'chatty-web-search-v1'
 
@@ -137,7 +135,6 @@ const selectedModel = ref('')
 const loadingModels = ref(false)
 const prompt = ref('')
 const busy = ref(false)
-const userId = ref(loadUserId())
 const currentChatId = ref(createScopedId('chat'))
 const useWebSearch = ref(false)
 
@@ -201,22 +198,6 @@ function createScopedId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function loadUserId() {
-  try {
-    const stored = localStorage.getItem(USER_STORAGE_KEY)
-    if (stored) return stored
-  } catch {
-    // Ignore storage errors.
-  }
-  const created = createScopedId('user')
-  try {
-    localStorage.setItem(USER_STORAGE_KEY, created)
-  } catch {
-    // Ignore storage errors.
-  }
-  return created
-}
-
 function resetChatId() {
   currentChatId.value = createScopedId('chat')
 }
@@ -240,15 +221,11 @@ function clearMetaRefresh() {
 }
 
 function buildChatMetaUrl(chatId: string) {
-  const url = new URL(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}`)
-  url.searchParams.set('user_id', userId.value)
-  return url.toString()
+  return `${API_BASE}/api/chats/${encodeURIComponent(chatId)}`
 }
 
 function buildChatInfoStreamUrl(chatId: string) {
-  const url = new URL(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/stream`)
-  url.searchParams.set('user_id', userId.value)
-  return url.toString()
+  return `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/stream`
 }
 
 function closeChatInfoStream() {
@@ -308,7 +285,7 @@ function scheduleChatInfoReconnect(chatId: string) {
 }
 
 function openChatInfoStream(chatId: string, isRetry = false) {
-  if (!chatId || !userId.value || !API_BASE) return
+  if (!chatId || !API_BASE) return
   if (!isRetry) {
     closeChatInfoStream()
   }
@@ -486,7 +463,6 @@ type StreamEvent = {
 type ChatInfoUpdate = {
   type?: string
   chat_id?: string
-  user_id?: string
   content?: {
     title?: string
     topic?: string
@@ -883,7 +859,6 @@ async function loadModels() {
 async function streamCompletion(model: string, text: string) {
   streamInfo.value = STRATEGY_STREAM_INFO
   const payload = {
-    user_id: userId.value,
     chat_id: currentChatId.value,
     model_id: model,
     prompt: text,
@@ -909,7 +884,9 @@ async function streamCompletion(model: string, text: string) {
   try {
     const res = await fetch(ENDPOINTS.chat, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
@@ -1078,8 +1055,8 @@ onBeforeUnmount(() => {
   cancelActiveRequest()
 })
 
-watch([currentChatId, userId], ([chatId, nextUserId]) => {
-  if (!chatId || !nextUserId) {
+watch(currentChatId, (chatId) => {
+  if (!chatId) {
     closeChatInfoStream()
     return
   }

@@ -170,7 +170,6 @@ const props = defineProps<{
   currentChatId: string
   busy: boolean
   apiBase: string
-  userId: string
   isMobile: boolean
 }>()
 
@@ -362,29 +361,22 @@ function scheduleTimestampRetry(chatId: string) {
 }
 
 function buildListUrl() {
-  const url = new URL(`${props.apiBase}/api/chats`)
-  url.searchParams.set('user_id', props.userId)
-  return url.toString()
+  return `${props.apiBase}/api/chats`
 }
 
 function buildMessagesUrl(chatId: string) {
   const url = new URL(`${props.apiBase}/api/chats/${encodeURIComponent(chatId)}/messages`)
-  url.searchParams.set('user_id', props.userId)
   url.searchParams.set('offset', '0')
   url.searchParams.set('limit', '200')
   return url.toString()
 }
 
 function buildChatMetaUrl(chatId: string) {
-  const url = new URL(`${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`)
-  url.searchParams.set('user_id', props.userId)
-  return url.toString()
+  return `${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`
 }
 
 function buildDeleteUrl(chatId: string) {
-  const url = new URL(`${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`)
-  url.searchParams.set('user_id', props.userId)
-  return url.toString()
+  return `${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`
 }
 
 function extractTitle(chat: ChatSummary) {
@@ -405,7 +397,7 @@ function normalizeTimestamp(value: unknown) {
 }
 
 async function fetchChatList(options: { showLoading?: boolean } = {}) {
-  if (!props.userId || !props.apiBase) return
+  if (!props.apiBase) return
   const showLoading = options.showLoading ?? conversations.value.length === 0
   if (showLoading) {
     isLoading.value = true
@@ -469,7 +461,7 @@ async function fetchChatList(options: { showLoading?: boolean } = {}) {
 }
 
 async function fetchChatMeta(chatId: string) {
-  if (!props.userId || !props.apiBase || !chatId) return
+  if (!props.apiBase || !chatId) return
   try {
     const res = await fetch(buildChatMetaUrl(chatId))
     if (!res.ok) throw new Error(`Meta failed: ${res.status}`)
@@ -527,7 +519,9 @@ async function fetchChatMessages(chatId: string): Promise<MessageLike[]> {
 async function handleDeleteConversation(chatId: string) {
   if (isDisabledChatId(chatId) || props.busy) return
   try {
-    const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
+    const res = await fetch(buildDeleteUrl(chatId), {
+      method: 'DELETE',
+    })
     if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
     conversations.value = conversations.value.filter((item) => item.chatId !== chatId)
     if (chatId === props.currentChatId) {
@@ -558,7 +552,9 @@ async function confirmRemoveAll() {
     const ids = conversations.value.map((item) => item.chatId)
     for (const chatId of ids) {
       try {
-        const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
+        const res = await fetch(buildDeleteUrl(chatId), {
+          method: 'DELETE',
+        })
         if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
       } catch {
         // keep going
@@ -584,10 +580,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleDeleteKeydown)
   document.removeEventListener('pointerdown', handleDocumentPointer)
-})
-watch(() => props.userId, () => {
-  clearPendingRefresh()
-  fetchChatList({ showLoading: false })
 })
 watch(() => props.apiBase, () => {
   clearPendingRefresh()
