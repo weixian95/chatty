@@ -43,7 +43,15 @@
           </div>
         </div>
       </div>
-      <div class="message-time">{{ formatTimestamp(message.ts) }}</div>
+      <div class="message-time">
+        {{ formatTimestamp(message.ts) }}
+        <span
+          v-if="message.role === 'bot' && message.polished === true && message.html"
+          class="polish-flag"
+        >
+          · polished
+        </span>
+      </div>
     </div>
   </div>
 </template>
@@ -58,6 +66,7 @@ type ChatMessage = {
   ts?: number | null
   pending?: boolean
   citations?: Array<{ url: string; title?: string }>
+  polished?: boolean
 }
 
 defineProps<{ messages: ChatMessage[]; streamInfo?: string }>()
@@ -177,6 +186,14 @@ defineExpose({ scrollToBottom })
   font-size: 0.72rem;
   color: rgba(231, 237, 247, 0.7);
   text-align: right;
+}
+
+.polish-flag {
+  margin-left: 6px;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: rgba(231, 237, 247, 0.55);
 }
 
 .message-sources {
