@@ -3,9 +3,9 @@
     <ChatHistoryPanel
       ref="historyRef"
       :current-chat-id="currentChatId"
-      :busy="busy"
+      :busy="historyLocked"
+      :chat-states="chatUiState"
       :api-base="API_BASE"
-      :user-id="userId"
       :is-mobile="isMobileWidth"
       @clear="handleClearActiveChat"
       @open="handleOpenConversation"
@@ -65,10 +65,10 @@
           <div class="prompt-field">
             <PromptInput v-model="prompt" :disabled="busy" @submit="handleSubmit" />
             <button
-              v-if="busy"
+              v-if="localBusy"
               class="primary send-inside cancel-inside"
               type="button"
-              :disabled="!busy"
+              :disabled="!localBusy"
               @click="cancelActiveRequest"
               aria-label="Cancel"
             >
@@ -99,7 +99,6 @@ const ENDPOINTS = {
   chat: `${API_BASE}/api/chat`,
   health: `${API_BASE}/health`,
 }
-const USER_STORAGE_KEY = 'chatty-user-id-v1'
 const MODEL_STORAGE_KEY = 'chatty-selected-model-v1'
 const WEB_SEARCH_STORAGE_KEY = 'chatty-web-search-v1'
 
@@ -117,6 +116,7 @@ type Message = {
   pending?: boolean
   citations?: Array<{ url: string; title?: string }>
   polished?: boolean
+  remotePending?: boolean
 }
 
 type StoredMessage = {
@@ -127,25 +127,81 @@ type StoredMessage = {
   polished?: boolean
 }
 
+type ChatSummary = {
+  chat_id?: string
+  title?: string
+  chat_title?: string
+  summary?: string
+  topic?: string
+  last_updated_ts?: number
+  last_message_ts?: number
+  last_summary_ts?: number
+  last_topic_ts?: number
+  raw_count?: number
+}
+
+type ChatListUpdate = {
+  type?: 'added' | 'updated' | 'deleted'
+  chat?: ChatSummary
+  chat_id?: string
+}
+
+type ChatUiState = {
+  chat_id?: string
+  use_web?: boolean | null
+  model_id?: string
+  busy?: boolean
+  input_disabled?: boolean
+  history_locked?: boolean
+  active?: boolean
+  last_message_id?: string
+  last_update_ts?: number
+}
+
+type GlobalUiState = {
+  active_chat_id?: string
+  busy?: boolean
+  busy_chats?: string[]
+  input_disabled?: boolean
+  history_locked?: boolean
+}
+
+type UiStateSnapshot = {
+  global?: GlobalUiState
+  chats?: ChatUiState[]
+}
+
 type HistoryPanelExpose = {
   refreshList: () => void
   applyChatInfoUpdate: (update: ChatInfoUpdate) => void
+  applyChatListSnapshot: (chats: ChatSummary[]) => void
+  applyChatListUpdate: (update: ChatListUpdate) => void
 }
 
 const models = ref<string[]>([])
 const selectedModel = ref('')
 const loadingModels = ref(false)
 const prompt = ref('')
-const busy = ref(false)
-const userId = ref(loadUserId())
+const localBusy = ref(false)
 const currentChatId = ref(createScopedId('chat'))
 const useWebSearch = ref(false)
+const defaultWebSearch = ref(false)
+const globalUiState = reactive<GlobalUiState>({
+  active_chat_id: '',
+  busy: false,
+  busy_chats: [],
+  input_disabled: false,
+  history_locked: false,
+})
+const chatUiState = reactive<Record<string, ChatUiState>>({})
 
 const historyRef = ref<HistoryPanelExpose | null>(null)
 const logRef = ref<InstanceType<typeof Log> | null>(null)
 const messages = ref<Message[]>([])
 const activeAbort = ref<AbortController | null>(null)
 const activeMessageId = ref<string | null>(null)
+const remotePendingId = ref<string | null>(null)
+const remotePendingCleanupTimer = ref<number | null>(null)
 const historyRefreshTimer = ref<number | null>(null)
 const streamInfo = ref('')
 const currentTopic = ref('')
@@ -157,6 +213,10 @@ const chatInfoSource = ref<EventSource | null>(null)
 const chatInfoReconnectTimer = ref<number | null>(null)
 const chatInfoRetryMs = ref(1000)
 const CHAT_INFO_RETRY_MAX = 30000
+const globalStreamSource = ref<EventSource | null>(null)
+const globalStreamReconnectTimer = ref<number | null>(null)
+const globalStreamRetryMs = ref(1000)
+const GLOBAL_STREAM_RETRY_MAX = 30000
 const STRATEGY_STREAM_INFO = 'Deciding information sources...'
 const DEFAULT_STREAM_INFO = 'Contacting model...'
 const STREAMING_INFO = 'Generating response...'
@@ -184,6 +244,15 @@ const serverStatusAlert = computed(() => {
   if (serverStatus.value !== 'offline') return ''
   return 'Server offline or not on Tailnet.'
 })
+const historyLocked = computed(() => localBusy.value)
+const currentChatState = computed(() => chatUiState[currentChatId.value])
+const remoteChatBusy = computed(() => {
+  const state = currentChatState.value
+  if (!state) return false
+  if (typeof state.input_disabled === 'boolean') return state.input_disabled
+  return Boolean(state.busy)
+})
+const busy = computed(() => localBusy.value || remoteChatBusy.value)
 const HEALTH_BASE_DELAY = 2000
 const HEALTH_MAX_DELAY = 30000
 const HEALTH_SUCCESS_INTERVAL = 15000
@@ -199,22 +268,6 @@ function createScopedId(prefix: string) {
     return `${prefix}-${crypto.randomUUID()}`
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function loadUserId() {
-  try {
-    const stored = localStorage.getItem(USER_STORAGE_KEY)
-    if (stored) return stored
-  } catch {
-    // Ignore storage errors.
-  }
-  const created = createScopedId('user')
-  try {
-    localStorage.setItem(USER_STORAGE_KEY, created)
-  } catch {
-    // Ignore storage errors.
-  }
-  return created
 }
 
 function resetChatId() {
@@ -240,15 +293,19 @@ function clearMetaRefresh() {
 }
 
 function buildChatMetaUrl(chatId: string) {
-  const url = new URL(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}`)
-  url.searchParams.set('user_id', userId.value)
-  return url.toString()
+  return `${API_BASE}/api/chats/${encodeURIComponent(chatId)}`
 }
 
 function buildChatInfoStreamUrl(chatId: string) {
-  const url = new URL(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/stream`)
-  url.searchParams.set('user_id', userId.value)
-  return url.toString()
+  return `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/stream`
+}
+
+function buildGlobalStreamUrl() {
+  return `${API_BASE}/api/stream`
+}
+
+function buildChatStateUrl(chatId: string) {
+  return `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/state`
 }
 
 function closeChatInfoStream() {
@@ -260,6 +317,190 @@ function closeChatInfoStream() {
   if (chatInfoSource.value) {
     chatInfoSource.value.close()
     chatInfoSource.value = null
+  }
+}
+
+function closeGlobalStream() {
+  if (globalStreamReconnectTimer.value !== null) {
+    window.clearTimeout(globalStreamReconnectTimer.value)
+    globalStreamReconnectTimer.value = null
+  }
+  globalStreamRetryMs.value = 1000
+  if (globalStreamSource.value) {
+    globalStreamSource.value.close()
+    globalStreamSource.value = null
+  }
+}
+
+function applyGlobalStateSnapshot(payload?: GlobalUiState) {
+  if (!payload) return
+  if (typeof payload.active_chat_id === 'string') {
+    globalUiState.active_chat_id = payload.active_chat_id
+  }
+  if (typeof payload.busy === 'boolean') {
+    globalUiState.busy = payload.busy
+  }
+  if (Array.isArray(payload.busy_chats)) {
+    globalUiState.busy_chats = payload.busy_chats.filter((id) => typeof id === 'string')
+  }
+  if (typeof payload.input_disabled === 'boolean') {
+    globalUiState.input_disabled = payload.input_disabled
+  }
+  if (typeof payload.history_locked === 'boolean') {
+    globalUiState.history_locked = payload.history_locked
+  }
+}
+
+function applyChatStateSnapshot(chatId: string, payload?: ChatUiState) {
+  if (!chatId || !payload) return
+  const existing = chatUiState[chatId] || { chat_id: chatId }
+  const updated: ChatUiState = { ...existing, chat_id: chatId }
+
+  if (typeof payload.use_web === 'boolean') {
+    updated.use_web = payload.use_web
+  }
+  if (typeof payload.model_id === 'string') {
+    updated.model_id = payload.model_id
+  }
+  if (typeof payload.busy === 'boolean') {
+    updated.busy = payload.busy
+    if (typeof updated.input_disabled !== 'boolean') {
+      updated.input_disabled = payload.busy
+    }
+  }
+  if (typeof payload.input_disabled === 'boolean') {
+    updated.input_disabled = payload.input_disabled
+  }
+  if (typeof payload.history_locked === 'boolean') {
+    updated.history_locked = payload.history_locked
+  }
+  if (typeof payload.active === 'boolean') {
+    updated.active = payload.active
+  }
+  if (typeof payload.last_message_id === 'string') {
+    updated.last_message_id = payload.last_message_id
+  }
+  if (typeof payload.last_update_ts === 'number') {
+    updated.last_update_ts = payload.last_update_ts
+  }
+
+  chatUiState[chatId] = updated
+
+  if (chatId === currentChatId.value && typeof updated.use_web === 'boolean') {
+    useWebSearch.value = updated.use_web
+  }
+  if (chatId === currentChatId.value && typeof updated.model_id === 'string' && updated.model_id) {
+    selectedModel.value = updated.model_id
+  }
+}
+
+function applyUiStateSnapshot(snapshot?: UiStateSnapshot) {
+  if (!snapshot) return
+  if (snapshot.global) {
+    applyGlobalStateSnapshot(snapshot.global)
+  }
+  if (Array.isArray(snapshot.chats)) {
+    snapshot.chats.forEach((state) => {
+      if (state && typeof state.chat_id === 'string') {
+        applyChatStateSnapshot(state.chat_id, state)
+      }
+    })
+  }
+}
+
+function handleChatListSnapshot(chats?: ChatSummary[]) {
+  if (!Array.isArray(chats)) return
+  historyRef.value?.applyChatListSnapshot(chats)
+}
+
+function handleChatListUpdate(update?: ChatListUpdate) {
+  if (!update) return
+  historyRef.value?.applyChatListUpdate(update)
+  if (update.type === 'deleted' && update.chat_id === currentChatId.value) {
+    handleClearActiveChat({ force: true })
+  }
+}
+
+function scheduleGlobalStreamReconnect() {
+  if (globalStreamReconnectTimer.value !== null) return
+  const delay = globalStreamRetryMs.value
+  globalStreamReconnectTimer.value = window.setTimeout(() => {
+    globalStreamReconnectTimer.value = null
+    openGlobalStream(true)
+  }, delay)
+  globalStreamRetryMs.value = Math.min(
+    globalStreamRetryMs.value * 2,
+    GLOBAL_STREAM_RETRY_MAX,
+  )
+}
+
+function openGlobalStream(isRetry = false) {
+  if (!API_BASE) return
+  if (!isRetry) {
+    closeGlobalStream()
+  }
+  try {
+    const source = new EventSource(buildGlobalStreamUrl())
+    source.addEventListener('chatlist', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as { chats?: ChatSummary[] }
+        handleChatListSnapshot(payload.chats)
+      } catch {
+        // ignore
+      }
+    })
+    source.addEventListener('chatlistupdate', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as ChatListUpdate
+        handleChatListUpdate(payload)
+      } catch {
+        // ignore
+      }
+    })
+    source.addEventListener('uistate', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as UiStateSnapshot
+        applyUiStateSnapshot(payload)
+      } catch {
+        // ignore
+      }
+    })
+    source.addEventListener('chatstate', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as {
+          chat_id?: string
+          state?: ChatUiState
+        }
+        if (payload && typeof payload.chat_id === 'string' && payload.state) {
+          applyChatStateSnapshot(payload.chat_id, payload.state)
+        }
+      } catch {
+        // ignore
+      }
+    })
+    source.addEventListener('globalstate', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as GlobalUiState
+        applyGlobalStateSnapshot(payload)
+      } catch {
+        // ignore
+      }
+    })
+    source.addEventListener('error', () => {
+      if (source.readyState === EventSource.CLOSED) {
+        scheduleGlobalStreamReconnect()
+      }
+    })
+    source.addEventListener('open', () => {
+      globalStreamRetryMs.value = 1000
+      if (globalStreamReconnectTimer.value !== null) {
+        window.clearTimeout(globalStreamReconnectTimer.value)
+        globalStreamReconnectTimer.value = null
+      }
+    })
+    globalStreamSource.value = source
+  } catch {
+    scheduleGlobalStreamReconnect()
   }
 }
 
@@ -283,6 +524,10 @@ function handleChatInfoUpdate(update: ChatInfoUpdate) {
     lastBot.raw = update.content.answer
     lastBot.html = sanitizeMarkdown(lastBot.raw)
     lastBot.pending = false
+    if (lastBot.remotePending) {
+      lastBot.remotePending = false
+      remotePendingId.value = null
+    }
     if (typeof update.content.polished === 'boolean') {
       lastBot.polished = update.content.polished
     } else {
@@ -308,7 +553,7 @@ function scheduleChatInfoReconnect(chatId: string) {
 }
 
 function openChatInfoStream(chatId: string, isRetry = false) {
-  if (!chatId || !userId.value || !API_BASE) return
+  if (!chatId || !API_BASE) return
   if (!isRetry) {
     closeChatInfoStream()
   }
@@ -318,6 +563,27 @@ function openChatInfoStream(chatId: string, isRetry = false) {
       try {
         const data = JSON.parse((event as MessageEvent).data) as ChatInfoUpdate
         handleChatInfoUpdate(data)
+      } catch {
+        // Ignore malformed updates.
+      }
+    })
+    source.addEventListener('chatstate', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as {
+          chat_id?: string
+          state?: ChatUiState
+        }
+        if (payload && typeof payload.chat_id === 'string' && payload.state) {
+          applyChatStateSnapshot(payload.chat_id, payload.state)
+        }
+      } catch {
+        // Ignore malformed updates.
+      }
+    })
+    source.addEventListener('globalstate', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as GlobalUiState
+        applyGlobalStateSnapshot(payload)
       } catch {
         // Ignore malformed updates.
       }
@@ -385,28 +651,38 @@ function scheduleMetaRefresh(chatId: string) {
   void poll()
 }
 
-function handleClearActiveChat() {
-  if (busy.value) return
+function handleClearActiveChat(options: { force?: boolean } = {}) {
+  if (!options.force && historyLocked.value) return
   messages.value = []
   prompt.value = ''
   currentTopic.value = ''
   currentTopicTs.value = null
   currentChatLastMessageTs.value = null
+  remotePendingId.value = null
+  clearRemotePendingTimer()
   clearMetaRefresh()
   resetChatId()
+  syncWebSearchForChat(currentChatId.value)
+  syncModelForChat(currentChatId.value)
+  void updateChatState(currentChatId.value, { active: true })
 }
 
 function handleOpenConversation(payload: {
   chatId: string
   messages: StoredMessage[]
 }) {
+  if (historyLocked.value) return
   messages.value = hydrateMessages(payload.messages)
   currentChatId.value = payload.chatId
   prompt.value = ''
   currentTopic.value = ''
   currentTopicTs.value = null
   currentChatLastMessageTs.value = null
+  remotePendingId.value = null
+  clearRemotePendingTimer()
   nextTick(scrollToBottom)
+  syncWebSearchForChat(payload.chatId)
+  syncModelForChat(payload.chatId)
   scheduleMetaRefresh(payload.chatId)
 }
 
@@ -429,10 +705,48 @@ function addMessage(role: Message['role'], text: string, ts?: number | null) {
     pending: false,
     polished: role === 'bot' ? false : undefined,
     citations: role === 'bot' ? extractCitations(text).map((url) => ({ url })) : [],
+    remotePending: false,
   })
   messages.value.push(message)
   nextTick(scrollToBottom)
   return message
+}
+
+function clearRemotePendingTimer() {
+  if (remotePendingCleanupTimer.value !== null) {
+    window.clearTimeout(remotePendingCleanupTimer.value)
+    remotePendingCleanupTimer.value = null
+  }
+}
+
+function ensureRemotePendingBubble() {
+  if (localBusy.value) return
+  const existing = [...messages.value].reverse().find((item) => item.role === 'bot' && item.pending)
+  if (existing) return
+  const message = addMessage('bot', '', Date.now())
+  message.raw = ''
+  message.html = ''
+  message.pending = true
+  message.remotePending = true
+  message.citations = []
+  remotePendingId.value = message.id
+}
+
+function scheduleRemotePendingCleanup() {
+  clearRemotePendingTimer()
+  if (!remotePendingId.value) return
+  remotePendingCleanupTimer.value = window.setTimeout(() => {
+    const index = messages.value.findIndex((item) => item.id === remotePendingId.value)
+    if (index === -1) {
+      remotePendingId.value = null
+      return
+    }
+    const item = messages.value[index]
+    if (item.pending && !item.raw) {
+      messages.value.splice(index, 1)
+    }
+    remotePendingId.value = null
+  }, 1500)
 }
 
 function removeMessage(id: string) {
@@ -486,7 +800,6 @@ type StreamEvent = {
 type ChatInfoUpdate = {
   type?: string
   chat_id?: string
-  user_id?: string
   content?: {
     title?: string
     topic?: string
@@ -814,14 +1127,18 @@ function loadWebSearchPreference() {
     const stored = localStorage.getItem(WEB_SEARCH_STORAGE_KEY)
     if (stored === '1') {
       useWebSearch.value = true
+      defaultWebSearch.value = true
       return
     }
     if (stored === '0') {
       useWebSearch.value = false
+      defaultWebSearch.value = false
+      return
     }
   } catch {
     // Ignore storage errors.
   }
+  defaultWebSearch.value = useWebSearch.value
 }
 
 function persistWebSearchPreference() {
@@ -832,10 +1149,51 @@ function persistWebSearchPreference() {
   }
 }
 
+function syncWebSearchForChat(chatId: string) {
+  if (!chatId) return
+  const state = chatUiState[chatId]
+  if (state && typeof state.use_web === 'boolean') {
+    useWebSearch.value = state.use_web
+    return
+  }
+  useWebSearch.value = defaultWebSearch.value
+}
+
+function syncModelForChat(chatId: string) {
+  if (!chatId) return
+  const state = chatUiState[chatId]
+  if (state && typeof state.model_id === 'string' && state.model_id) {
+    selectedModel.value = state.model_id
+    return
+  }
+  if (selectedModel.value) return
+  loadModelPreference()
+}
+
+async function updateChatState(
+  chatId: string,
+  updates: { use_web?: boolean; active?: boolean; model_id?: string },
+) {
+  if (!chatId || !API_BASE) return
+  try {
+    await fetch(buildChatStateUrl(chatId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    })
+  } catch {
+    // Ignore state sync errors.
+  }
+}
+
 watch(
   () => selectedModel.value,
-  () => {
+  (next) => {
     persistModelPreference()
+    if (!next) return
+    const state = currentChatState.value
+    if (state && state.model_id === next) return
+    void updateChatState(currentChatId.value, { model_id: next })
   },
 )
 
@@ -856,8 +1214,22 @@ watch(
   },
 )
 
+watch(
+  () => remoteChatBusy.value,
+  (next) => {
+    if (next) {
+      ensureRemotePendingBubble()
+    } else {
+      scheduleRemotePendingCleanup()
+    }
+  },
+)
+
 function toggleWebSearch() {
-  useWebSearch.value = !useWebSearch.value
+  if (busy.value) return
+  const next = !useWebSearch.value
+  useWebSearch.value = next
+  void updateChatState(currentChatId.value, { use_web: next })
 }
 
 async function loadModels() {
@@ -883,7 +1255,6 @@ async function loadModels() {
 async function streamCompletion(model: string, text: string) {
   streamInfo.value = STRATEGY_STREAM_INFO
   const payload = {
-    user_id: userId.value,
     chat_id: currentChatId.value,
     model_id: model,
     prompt: text,
@@ -891,6 +1262,15 @@ async function streamCompletion(model: string, text: string) {
     client_ts: Date.now(),
     stream: true,
     use_web: useWebSearch.value,
+  }
+
+  if (remotePendingId.value) {
+    const index = messages.value.findIndex((item) => item.id === remotePendingId.value)
+    if (index !== -1) {
+      messages.value.splice(index, 1)
+    }
+    remotePendingId.value = null
+    clearRemotePendingTimer()
   }
 
   const message = addMessage('bot', '', Date.now())
@@ -909,7 +1289,9 @@ async function streamCompletion(model: string, text: string) {
   try {
     const res = await fetch(ENDPOINTS.chat, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
@@ -1048,7 +1430,7 @@ async function handleSubmit() {
   prompt.value = ''
   addMessage('user', text, Date.now())
 
-  busy.value = true
+  localBusy.value = true
   try {
     const ok = await streamCompletion(selectedModel.value, text)
     if (ok) {
@@ -1056,7 +1438,7 @@ async function handleSubmit() {
       scheduleMetaRefresh(currentChatId.value)
     }
   } finally {
-    busy.value = false
+    localBusy.value = false
     streamInfo.value = ''
   }
 }
@@ -1067,23 +1449,32 @@ onMounted(loadModels)
 onMounted(startServerHealthPolling)
 onMounted(startMobileWidthWatcher)
 onMounted(() => {
+  openGlobalStream()
   if (currentChatId.value) {
     openChatInfoStream(currentChatId.value)
+    syncWebSearchForChat(currentChatId.value)
+    syncModelForChat(currentChatId.value)
+    void updateChatState(currentChatId.value, { active: true })
   }
 })
 onBeforeUnmount(() => {
   clearServerHealthTimer()
   clearMetaRefresh()
   closeChatInfoStream()
+  closeGlobalStream()
+  clearRemotePendingTimer()
   cancelActiveRequest()
 })
 
-watch([currentChatId, userId], ([chatId, nextUserId]) => {
-  if (!chatId || !nextUserId) {
+watch(currentChatId, (chatId) => {
+  if (!chatId) {
     closeChatInfoStream()
     return
   }
   openChatInfoStream(chatId)
+  syncWebSearchForChat(chatId)
+  syncModelForChat(chatId)
+  void updateChatState(chatId, { active: true })
 })
 </script>
 

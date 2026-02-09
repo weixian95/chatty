@@ -19,7 +19,19 @@
             @click="handleOpenConversation(item.chatId)"
           >
             <div class="conversation-row">
-              <span class="conversation-title">{{ item.title }}</span>
+              <div class="conversation-main">
+                <span class="conversation-title">{{ item.title }}</span>
+                <span
+                  v-if="item.busy"
+                  class="conversation-busy"
+                  title="In progress"
+                  aria-label="In progress"
+                >
+                  <span class="conversation-busy-dot"></span>
+                  <span class="conversation-busy-dot"></span>
+                  <span class="conversation-busy-dot"></span>
+                </span>
+              </div>
               <button
                 v-if="!item.disabled"
                 class="delete-conversation"
@@ -142,6 +154,19 @@ type ChatSummary = {
   raw_count?: number
 }
 
+type ChatUiState = {
+  busy?: boolean
+  input_disabled?: boolean
+  history_locked?: boolean
+  active?: boolean
+}
+
+type ChatListUpdate = {
+  type?: 'added' | 'updated' | 'deleted'
+  chat?: ChatSummary
+  chat_id?: string
+}
+
 type ChatInfoUpdate = {
   type?: string
   chat_id?: string
@@ -164,13 +189,14 @@ type ConversationItem = {
   title: string
   timestamp: string
   disabled?: boolean
+  busy?: boolean
 }
 
 const props = defineProps<{
   currentChatId: string
   busy: boolean
+  chatStates?: Record<string, ChatUiState>
   apiBase: string
-  userId: string
   isMobile: boolean
 }>()
 
@@ -236,21 +262,26 @@ const conversationItems = computed<ConversationItem[]>(() => {
     ]
   }
 
-  return conversations.value.map(({ chatId, title, displayTs }) => ({
-    chatId,
-    title,
-    timestamp:
-      displayTs === null
-        ? '--'
-        : new Date(displayTs).toLocaleString(undefined, {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          }),
-  }))
+  return conversations.value.map(({ chatId, title, displayTs }) => {
+    const state = props.chatStates?.[chatId]
+    const isBusy = Boolean(state?.input_disabled ?? state?.busy)
+    return {
+      chatId,
+      title,
+      busy: isBusy,
+      timestamp:
+        displayTs === null
+          ? '--'
+          : new Date(displayTs).toLocaleString(undefined, {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+    }
+  })
 })
 
 function toggleSidebar() {
@@ -362,29 +393,22 @@ function scheduleTimestampRetry(chatId: string) {
 }
 
 function buildListUrl() {
-  const url = new URL(`${props.apiBase}/api/chats`)
-  url.searchParams.set('user_id', props.userId)
-  return url.toString()
+  return `${props.apiBase}/api/chats`
 }
 
 function buildMessagesUrl(chatId: string) {
   const url = new URL(`${props.apiBase}/api/chats/${encodeURIComponent(chatId)}/messages`)
-  url.searchParams.set('user_id', props.userId)
   url.searchParams.set('offset', '0')
   url.searchParams.set('limit', '200')
   return url.toString()
 }
 
 function buildChatMetaUrl(chatId: string) {
-  const url = new URL(`${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`)
-  url.searchParams.set('user_id', props.userId)
-  return url.toString()
+  return `${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`
 }
 
 function buildDeleteUrl(chatId: string) {
-  const url = new URL(`${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`)
-  url.searchParams.set('user_id', props.userId)
-  return url.toString()
+  return `${props.apiBase}/api/chats/${encodeURIComponent(chatId)}`
 }
 
 function extractTitle(chat: ChatSummary) {
@@ -404,8 +428,47 @@ function normalizeTimestamp(value: unknown) {
   return raw < 1_000_000_000_000 ? raw * 1000 : raw
 }
 
+function normalizeConversation(chat: ChatSummary, existing?: Conversation | null) {
+  const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
+  if (!chatId) return null
+  const updated = normalizeTimestamp(chat.last_updated_ts ?? chat.last_message_ts)
+  const rawTitle = extractTitle(chat)
+  const topic =
+    typeof chat.topic === 'string' && chat.topic.trim().length > 0 ? chat.topic.trim() : null
+  const rawCount = typeof chat.raw_count === 'number' ? chat.raw_count : null
+  if ((!updated && !rawTitle && !topic) || (rawCount !== null && rawCount <= 0)) {
+    return null
+  }
+  const displayTs = updated ?? existing?.displayTs ?? null
+  const sortTs = updated ?? existing?.sortTs ?? (chatId === props.currentChatId ? Date.now() : null)
+  const title = rawTitle ?? existing?.title ?? fallbackTitle(chatId)
+  return {
+    chatId,
+    title,
+    topic,
+    displayTs,
+    sortTs,
+  }
+}
+
+function buildConversationList(chats: ChatSummary[]) {
+  const seen = new Set<string>()
+  const existingById = new Map(conversations.value.map((item) => [item.chatId, item]))
+  return chats
+    .map((chat) => {
+      const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
+      if (!chatId) return null
+      if (seen.has(chatId)) return null
+      seen.add(chatId)
+      const existing = existingById.get(chatId)
+      return normalizeConversation(chat, existing)
+    })
+    .filter((item): item is Conversation => item !== null)
+    .sort((a, b) => (b.sortTs ?? 0) - (a.sortTs ?? 0))
+}
+
 async function fetchChatList(options: { showLoading?: boolean } = {}) {
-  if (!props.userId || !props.apiBase) return
+  if (!props.apiBase) return
   const showLoading = options.showLoading ?? conversations.value.length === 0
   if (showLoading) {
     isLoading.value = true
@@ -416,41 +479,7 @@ async function fetchChatList(options: { showLoading?: boolean } = {}) {
     if (!res.ok) throw new Error(`List failed: ${res.status}`)
     const data = await res.json()
     const chats = Array.isArray(data.chats) ? data.chats : []
-    const seen = new Set<string>()
-    const existingById = new Map(conversations.value.map((item) => [item.chatId, item]))
-    conversations.value = chats
-      .map((chat: ChatSummary) => {
-        const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
-        if (!chatId) return null
-        if (seen.has(chatId)) return null
-        seen.add(chatId)
-        const updated = normalizeTimestamp(chat.last_updated_ts ?? chat.last_message_ts)
-        const rawTitle = extractTitle(chat)
-        const rawCount = typeof chat.raw_count === 'number' ? chat.raw_count : null
-        const topic =
-          typeof chat.topic === 'string' && chat.topic.trim().length > 0
-            ? chat.topic.trim()
-            : null
-        if ((!updated && !rawTitle && !topic) || (rawCount !== null && rawCount <= 0)) {
-          return null
-        }
-        const existing = existingById.get(chatId)
-        const displayTs = updated ?? existing?.displayTs ?? null
-        const sortTs =
-          updated ??
-          existing?.sortTs ??
-          (chatId === props.currentChatId ? Date.now() : null)
-        const title = rawTitle ?? existing?.title ?? fallbackTitle(chatId)
-        return {
-          chatId,
-          title,
-          topic,
-          displayTs,
-          sortTs,
-        }
-      })
-      .filter((item): item is Conversation => item !== null)
-      .sort((a, b) => (b.sortTs ?? 0) - (a.sortTs ?? 0))
+    conversations.value = buildConversationList(chats)
 
     const current = conversations.value.find((item) => item.chatId === props.currentChatId)
     if (current && current.displayTs === null) {
@@ -469,7 +498,7 @@ async function fetchChatList(options: { showLoading?: boolean } = {}) {
 }
 
 async function fetchChatMeta(chatId: string) {
-  if (!props.userId || !props.apiBase || !chatId) return
+  if (!props.apiBase || !chatId) return
   try {
     const res = await fetch(buildChatMetaUrl(chatId))
     if (!res.ok) throw new Error(`Meta failed: ${res.status}`)
@@ -527,7 +556,9 @@ async function fetchChatMessages(chatId: string): Promise<MessageLike[]> {
 async function handleDeleteConversation(chatId: string) {
   if (isDisabledChatId(chatId) || props.busy) return
   try {
-    const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
+    const res = await fetch(buildDeleteUrl(chatId), {
+      method: 'DELETE',
+    })
     if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
     conversations.value = conversations.value.filter((item) => item.chatId !== chatId)
     if (chatId === props.currentChatId) {
@@ -558,7 +589,9 @@ async function confirmRemoveAll() {
     const ids = conversations.value.map((item) => item.chatId)
     for (const chatId of ids) {
       try {
-        const res = await fetch(buildDeleteUrl(chatId), { method: 'DELETE' })
+        const res = await fetch(buildDeleteUrl(chatId), {
+          method: 'DELETE',
+        })
         if (!res.ok) throw new Error(`Delete failed: ${res.status}`)
       } catch {
         // keep going
@@ -584,10 +617,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleDeleteKeydown)
   document.removeEventListener('pointerdown', handleDocumentPointer)
-})
-watch(() => props.userId, () => {
-  clearPendingRefresh()
-  fetchChatList({ showLoading: false })
 })
 watch(() => props.apiBase, () => {
   clearPendingRefresh()
@@ -615,7 +644,51 @@ function applyChatInfoUpdate(update: ChatInfoUpdate) {
   }
 }
 
-defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
+function applyChatListSnapshot(chats: ChatSummary[]) {
+  conversations.value = buildConversationList(chats)
+  const current = conversations.value.find((item) => item.chatId === props.currentChatId)
+  if (current && current.displayTs === null) {
+    scheduleTimestampRetry(current.chatId)
+  } else {
+    clearPendingRefresh()
+  }
+}
+
+function applyChatListUpdate(update: ChatListUpdate) {
+  if (!update || !update.type) return
+  if (update.type === 'deleted') {
+    const chatId = typeof update.chat_id === 'string' ? update.chat_id : ''
+    if (!chatId) return
+    conversations.value = conversations.value.filter((item) => item.chatId !== chatId)
+    return
+  }
+  const payload = update.chat
+  if (!payload) return
+  const chatId = typeof payload.chat_id === 'string' ? payload.chat_id : ''
+  if (!chatId) return
+  const index = conversations.value.findIndex((item) => item.chatId === chatId)
+  const existing = index >= 0 ? conversations.value[index] : null
+  const normalized = normalizeConversation(payload, existing)
+  if (!normalized) {
+    if (index >= 0) {
+      conversations.value.splice(index, 1)
+    }
+    return
+  }
+  if (index >= 0) {
+    conversations.value.splice(index, 1, normalized)
+  } else {
+    conversations.value.push(normalized)
+  }
+  conversations.value.sort((a, b) => (b.sortTs ?? 0) - (a.sortTs ?? 0))
+}
+
+defineExpose({
+  refreshList: fetchChatList,
+  applyChatInfoUpdate,
+  applyChatListSnapshot,
+  applyChatListUpdate,
+})
 </script>
 
 <style lang="scss">
@@ -771,10 +844,57 @@ defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
     gap: 8px;
   }
 
+  .conversation-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .conversation-title {
     font-weight: 600;
     color: #e7edf7;
     font-size: 0.95rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conversation-busy {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: 0 0 auto;
+  }
+
+  .conversation-busy-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(96, 165, 250, 0.85);
+    box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3);
+    animation: busyDots 1.2s ease-in-out infinite;
+  }
+
+  .conversation-busy-dot:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .conversation-busy-dot:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  @keyframes busyDots {
+    0%,
+    100% {
+      opacity: 0.35;
+      transform: translateY(0);
+    }
+    50% {
+      opacity: 1;
+      transform: translateY(-1px);
+    }
   }
 
   .delete-conversation {
