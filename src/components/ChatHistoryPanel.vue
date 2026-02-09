@@ -142,6 +142,12 @@ type ChatSummary = {
   raw_count?: number
 }
 
+type ChatListUpdate = {
+  type?: 'added' | 'updated' | 'deleted'
+  chat?: ChatSummary
+  chat_id?: string
+}
+
 type ChatInfoUpdate = {
   type?: string
   chat_id?: string
@@ -396,6 +402,45 @@ function normalizeTimestamp(value: unknown) {
   return raw < 1_000_000_000_000 ? raw * 1000 : raw
 }
 
+function normalizeConversation(chat: ChatSummary, existing?: Conversation | null) {
+  const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
+  if (!chatId) return null
+  const updated = normalizeTimestamp(chat.last_updated_ts ?? chat.last_message_ts)
+  const rawTitle = extractTitle(chat)
+  const topic =
+    typeof chat.topic === 'string' && chat.topic.trim().length > 0 ? chat.topic.trim() : null
+  const rawCount = typeof chat.raw_count === 'number' ? chat.raw_count : null
+  if ((!updated && !rawTitle && !topic) || (rawCount !== null && rawCount <= 0)) {
+    return null
+  }
+  const displayTs = updated ?? existing?.displayTs ?? null
+  const sortTs = updated ?? existing?.sortTs ?? (chatId === props.currentChatId ? Date.now() : null)
+  const title = rawTitle ?? existing?.title ?? fallbackTitle(chatId)
+  return {
+    chatId,
+    title,
+    topic,
+    displayTs,
+    sortTs,
+  }
+}
+
+function buildConversationList(chats: ChatSummary[]) {
+  const seen = new Set<string>()
+  const existingById = new Map(conversations.value.map((item) => [item.chatId, item]))
+  return chats
+    .map((chat) => {
+      const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
+      if (!chatId) return null
+      if (seen.has(chatId)) return null
+      seen.add(chatId)
+      const existing = existingById.get(chatId)
+      return normalizeConversation(chat, existing)
+    })
+    .filter((item): item is Conversation => item !== null)
+    .sort((a, b) => (b.sortTs ?? 0) - (a.sortTs ?? 0))
+}
+
 async function fetchChatList(options: { showLoading?: boolean } = {}) {
   if (!props.apiBase) return
   const showLoading = options.showLoading ?? conversations.value.length === 0
@@ -408,41 +453,7 @@ async function fetchChatList(options: { showLoading?: boolean } = {}) {
     if (!res.ok) throw new Error(`List failed: ${res.status}`)
     const data = await res.json()
     const chats = Array.isArray(data.chats) ? data.chats : []
-    const seen = new Set<string>()
-    const existingById = new Map(conversations.value.map((item) => [item.chatId, item]))
-    conversations.value = chats
-      .map((chat: ChatSummary) => {
-        const chatId = typeof chat.chat_id === 'string' ? chat.chat_id : ''
-        if (!chatId) return null
-        if (seen.has(chatId)) return null
-        seen.add(chatId)
-        const updated = normalizeTimestamp(chat.last_updated_ts ?? chat.last_message_ts)
-        const rawTitle = extractTitle(chat)
-        const rawCount = typeof chat.raw_count === 'number' ? chat.raw_count : null
-        const topic =
-          typeof chat.topic === 'string' && chat.topic.trim().length > 0
-            ? chat.topic.trim()
-            : null
-        if ((!updated && !rawTitle && !topic) || (rawCount !== null && rawCount <= 0)) {
-          return null
-        }
-        const existing = existingById.get(chatId)
-        const displayTs = updated ?? existing?.displayTs ?? null
-        const sortTs =
-          updated ??
-          existing?.sortTs ??
-          (chatId === props.currentChatId ? Date.now() : null)
-        const title = rawTitle ?? existing?.title ?? fallbackTitle(chatId)
-        return {
-          chatId,
-          title,
-          topic,
-          displayTs,
-          sortTs,
-        }
-      })
-      .filter((item): item is Conversation => item !== null)
-      .sort((a, b) => (b.sortTs ?? 0) - (a.sortTs ?? 0))
+    conversations.value = buildConversationList(chats)
 
     const current = conversations.value.find((item) => item.chatId === props.currentChatId)
     if (current && current.displayTs === null) {
@@ -607,7 +618,51 @@ function applyChatInfoUpdate(update: ChatInfoUpdate) {
   }
 }
 
-defineExpose({ refreshList: fetchChatList, applyChatInfoUpdate })
+function applyChatListSnapshot(chats: ChatSummary[]) {
+  conversations.value = buildConversationList(chats)
+  const current = conversations.value.find((item) => item.chatId === props.currentChatId)
+  if (current && current.displayTs === null) {
+    scheduleTimestampRetry(current.chatId)
+  } else {
+    clearPendingRefresh()
+  }
+}
+
+function applyChatListUpdate(update: ChatListUpdate) {
+  if (!update || !update.type) return
+  if (update.type === 'deleted') {
+    const chatId = typeof update.chat_id === 'string' ? update.chat_id : ''
+    if (!chatId) return
+    conversations.value = conversations.value.filter((item) => item.chatId !== chatId)
+    return
+  }
+  const payload = update.chat
+  if (!payload) return
+  const chatId = typeof payload.chat_id === 'string' ? payload.chat_id : ''
+  if (!chatId) return
+  const index = conversations.value.findIndex((item) => item.chatId === chatId)
+  const existing = index >= 0 ? conversations.value[index] : null
+  const normalized = normalizeConversation(payload, existing)
+  if (!normalized) {
+    if (index >= 0) {
+      conversations.value.splice(index, 1)
+    }
+    return
+  }
+  if (index >= 0) {
+    conversations.value.splice(index, 1, normalized)
+  } else {
+    conversations.value.push(normalized)
+  }
+  conversations.value.sort((a, b) => (b.sortTs ?? 0) - (a.sortTs ?? 0))
+}
+
+defineExpose({
+  refreshList: fetchChatList,
+  applyChatInfoUpdate,
+  applyChatListSnapshot,
+  applyChatListUpdate,
+})
 </script>
 
 <style lang="scss">
