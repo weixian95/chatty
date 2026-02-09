@@ -21,8 +21,15 @@
             <div class="conversation-row">
               <div class="conversation-main">
                 <span class="conversation-title">{{ item.title }}</span>
-                <span v-if="item.busy" class="conversation-busy" title="In progress">
-                  In progress
+                <span
+                  v-if="item.busy"
+                  class="conversation-busy"
+                  title="In progress"
+                  aria-label="In progress"
+                >
+                  <span class="conversation-busy-dot"></span>
+                  <span class="conversation-busy-dot"></span>
+                  <span class="conversation-busy-dot"></span>
                 </span>
               </div>
               <button
@@ -855,14 +862,39 @@ defineExpose({
   }
 
   .conversation-busy {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 2px 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex: 0 0 auto;
+  }
+
+  .conversation-busy-dot {
+    width: 4px;
+    height: 4px;
     border-radius: 999px;
-    background: rgba(94, 234, 212, 0.18);
-    color: rgba(165, 243, 252, 0.9);
-    border: 1px solid rgba(94, 234, 212, 0.4);
+    background: rgba(96, 165, 250, 0.85);
+    box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3);
+    animation: busyDots 1.2s ease-in-out infinite;
+  }
+
+  .conversation-busy-dot:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .conversation-busy-dot:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  @keyframes busyDots {
+    0%,
+    100% {
+      opacity: 0.35;
+      transform: translateY(0);
+    }
+    50% {
+      opacity: 1;
+      transform: translateY(-1px);
+    }
   }
 
   .delete-conversation {
