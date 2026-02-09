@@ -19,7 +19,12 @@
             @click="handleOpenConversation(item.chatId)"
           >
             <div class="conversation-row">
-              <span class="conversation-title">{{ item.title }}</span>
+              <div class="conversation-main">
+                <span class="conversation-title">{{ item.title }}</span>
+                <span v-if="item.busy" class="conversation-busy" title="In progress">
+                  In progress
+                </span>
+              </div>
               <button
                 v-if="!item.disabled"
                 class="delete-conversation"
@@ -142,6 +147,13 @@ type ChatSummary = {
   raw_count?: number
 }
 
+type ChatUiState = {
+  busy?: boolean
+  input_disabled?: boolean
+  history_locked?: boolean
+  active?: boolean
+}
+
 type ChatListUpdate = {
   type?: 'added' | 'updated' | 'deleted'
   chat?: ChatSummary
@@ -170,11 +182,13 @@ type ConversationItem = {
   title: string
   timestamp: string
   disabled?: boolean
+  busy?: boolean
 }
 
 const props = defineProps<{
   currentChatId: string
   busy: boolean
+  chatStates?: Record<string, ChatUiState>
   apiBase: string
   isMobile: boolean
 }>()
@@ -241,21 +255,26 @@ const conversationItems = computed<ConversationItem[]>(() => {
     ]
   }
 
-  return conversations.value.map(({ chatId, title, displayTs }) => ({
-    chatId,
-    title,
-    timestamp:
-      displayTs === null
-        ? '--'
-        : new Date(displayTs).toLocaleString(undefined, {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          }),
-  }))
+  return conversations.value.map(({ chatId, title, displayTs }) => {
+    const state = props.chatStates?.[chatId]
+    const isBusy = Boolean(state?.input_disabled ?? state?.busy)
+    return {
+      chatId,
+      title,
+      busy: isBusy,
+      timestamp:
+        displayTs === null
+          ? '--'
+          : new Date(displayTs).toLocaleString(undefined, {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+    }
+  })
 })
 
 function toggleSidebar() {
@@ -818,10 +837,32 @@ defineExpose({
     gap: 8px;
   }
 
+  .conversation-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .conversation-title {
     font-weight: 600;
     color: #e7edf7;
     font-size: 0.95rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conversation-busy {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(94, 234, 212, 0.18);
+    color: rgba(165, 243, 252, 0.9);
+    border: 1px solid rgba(94, 234, 212, 0.4);
   }
 
   .delete-conversation {

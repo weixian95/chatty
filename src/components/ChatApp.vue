@@ -4,6 +4,7 @@
       ref="historyRef"
       :current-chat-id="currentChatId"
       :busy="historyLocked"
+      :chat-states="chatUiState"
       :api-base="API_BASE"
       :is-mobile="isMobileWidth"
       @clear="handleClearActiveChat"
@@ -243,7 +244,7 @@ const serverStatusAlert = computed(() => {
   if (serverStatus.value !== 'offline') return ''
   return 'Server offline or not on Tailnet.'
 })
-const historyLocked = computed(() => Boolean(globalUiState.history_locked))
+const historyLocked = computed(() => localBusy.value)
 const currentChatState = computed(() => chatUiState[currentChatId.value])
 const remoteChatBusy = computed(() => {
   const state = currentChatState.value
