@@ -115,6 +115,7 @@ type Message = {
   pending?: boolean
   citations?: Array<{ url: string; title?: string }>
   polished?: boolean
+  remotePending?: boolean
 }
 
 type StoredMessage = {
@@ -147,6 +148,7 @@ type ChatListUpdate = {
 type ChatUiState = {
   chat_id?: string
   use_web?: boolean | null
+  model_id?: string
   busy?: boolean
   input_disabled?: boolean
   history_locked?: boolean
@@ -197,6 +199,8 @@ const logRef = ref<InstanceType<typeof Log> | null>(null)
 const messages = ref<Message[]>([])
 const activeAbort = ref<AbortController | null>(null)
 const activeMessageId = ref<string | null>(null)
+const remotePendingId = ref<string | null>(null)
+const remotePendingCleanupTimer = ref<number | null>(null)
 const historyRefreshTimer = ref<number | null>(null)
 const streamInfo = ref('')
 const currentTopic = ref('')
@@ -354,6 +358,9 @@ function applyChatStateSnapshot(chatId: string, payload?: ChatUiState) {
   if (typeof payload.use_web === 'boolean') {
     updated.use_web = payload.use_web
   }
+  if (typeof payload.model_id === 'string') {
+    updated.model_id = payload.model_id
+  }
   if (typeof payload.busy === 'boolean') {
     updated.busy = payload.busy
     if (typeof updated.input_disabled !== 'boolean') {
@@ -380,6 +387,9 @@ function applyChatStateSnapshot(chatId: string, payload?: ChatUiState) {
 
   if (chatId === currentChatId.value && typeof updated.use_web === 'boolean') {
     useWebSearch.value = updated.use_web
+  }
+  if (chatId === currentChatId.value && typeof updated.model_id === 'string' && updated.model_id) {
+    selectedModel.value = updated.model_id
   }
 }
 
@@ -513,6 +523,10 @@ function handleChatInfoUpdate(update: ChatInfoUpdate) {
     lastBot.raw = update.content.answer
     lastBot.html = sanitizeMarkdown(lastBot.raw)
     lastBot.pending = false
+    if (lastBot.remotePending) {
+      lastBot.remotePending = false
+      remotePendingId.value = null
+    }
     if (typeof update.content.polished === 'boolean') {
       lastBot.polished = update.content.polished
     } else {
@@ -643,9 +657,12 @@ function handleClearActiveChat(options: { force?: boolean } = {}) {
   currentTopic.value = ''
   currentTopicTs.value = null
   currentChatLastMessageTs.value = null
+  remotePendingId.value = null
+  clearRemotePendingTimer()
   clearMetaRefresh()
   resetChatId()
   syncWebSearchForChat(currentChatId.value)
+  syncModelForChat(currentChatId.value)
   void updateChatState(currentChatId.value, { active: true })
 }
 
@@ -660,8 +677,11 @@ function handleOpenConversation(payload: {
   currentTopic.value = ''
   currentTopicTs.value = null
   currentChatLastMessageTs.value = null
+  remotePendingId.value = null
+  clearRemotePendingTimer()
   nextTick(scrollToBottom)
   syncWebSearchForChat(payload.chatId)
+  syncModelForChat(payload.chatId)
   scheduleMetaRefresh(payload.chatId)
 }
 
@@ -684,10 +704,48 @@ function addMessage(role: Message['role'], text: string, ts?: number | null) {
     pending: false,
     polished: role === 'bot' ? false : undefined,
     citations: role === 'bot' ? extractCitations(text).map((url) => ({ url })) : [],
+    remotePending: false,
   })
   messages.value.push(message)
   nextTick(scrollToBottom)
   return message
+}
+
+function clearRemotePendingTimer() {
+  if (remotePendingCleanupTimer.value !== null) {
+    window.clearTimeout(remotePendingCleanupTimer.value)
+    remotePendingCleanupTimer.value = null
+  }
+}
+
+function ensureRemotePendingBubble() {
+  if (localBusy.value) return
+  const existing = [...messages.value].reverse().find((item) => item.role === 'bot' && item.pending)
+  if (existing) return
+  const message = addMessage('bot', '', Date.now())
+  message.raw = ''
+  message.html = ''
+  message.pending = true
+  message.remotePending = true
+  message.citations = []
+  remotePendingId.value = message.id
+}
+
+function scheduleRemotePendingCleanup() {
+  clearRemotePendingTimer()
+  if (!remotePendingId.value) return
+  remotePendingCleanupTimer.value = window.setTimeout(() => {
+    const index = messages.value.findIndex((item) => item.id === remotePendingId.value)
+    if (index === -1) {
+      remotePendingId.value = null
+      return
+    }
+    const item = messages.value[index]
+    if (item.pending && !item.raw) {
+      messages.value.splice(index, 1)
+    }
+    remotePendingId.value = null
+  }, 1500)
 }
 
 function removeMessage(id: string) {
@@ -1100,9 +1158,20 @@ function syncWebSearchForChat(chatId: string) {
   useWebSearch.value = defaultWebSearch.value
 }
 
+function syncModelForChat(chatId: string) {
+  if (!chatId) return
+  const state = chatUiState[chatId]
+  if (state && typeof state.model_id === 'string' && state.model_id) {
+    selectedModel.value = state.model_id
+    return
+  }
+  if (selectedModel.value) return
+  loadModelPreference()
+}
+
 async function updateChatState(
   chatId: string,
-  updates: { use_web?: boolean; active?: boolean },
+  updates: { use_web?: boolean; active?: boolean; model_id?: string },
 ) {
   if (!chatId || !API_BASE) return
   try {
@@ -1118,8 +1187,12 @@ async function updateChatState(
 
 watch(
   () => selectedModel.value,
-  () => {
+  (next) => {
     persistModelPreference()
+    if (!next) return
+    const state = currentChatState.value
+    if (state && state.model_id === next) return
+    void updateChatState(currentChatId.value, { model_id: next })
   },
 )
 
@@ -1136,6 +1209,17 @@ watch(
     if (next === 'online' && prev !== 'online') {
       loadModels()
       scheduleHistoryRefresh()
+    }
+  },
+)
+
+watch(
+  () => remoteChatBusy.value,
+  (next) => {
+    if (next) {
+      ensureRemotePendingBubble()
+    } else {
+      scheduleRemotePendingCleanup()
     }
   },
 )
@@ -1177,6 +1261,15 @@ async function streamCompletion(model: string, text: string) {
     client_ts: Date.now(),
     stream: true,
     use_web: useWebSearch.value,
+  }
+
+  if (remotePendingId.value) {
+    const index = messages.value.findIndex((item) => item.id === remotePendingId.value)
+    if (index !== -1) {
+      messages.value.splice(index, 1)
+    }
+    remotePendingId.value = null
+    clearRemotePendingTimer()
   }
 
   const message = addMessage('bot', '', Date.now())
@@ -1359,6 +1452,7 @@ onMounted(() => {
   if (currentChatId.value) {
     openChatInfoStream(currentChatId.value)
     syncWebSearchForChat(currentChatId.value)
+    syncModelForChat(currentChatId.value)
     void updateChatState(currentChatId.value, { active: true })
   }
 })
@@ -1367,6 +1461,7 @@ onBeforeUnmount(() => {
   clearMetaRefresh()
   closeChatInfoStream()
   closeGlobalStream()
+  clearRemotePendingTimer()
   cancelActiveRequest()
 })
 
@@ -1377,6 +1472,7 @@ watch(currentChatId, (chatId) => {
   }
   openChatInfoStream(chatId)
   syncWebSearchForChat(chatId)
+  syncModelForChat(chatId)
   void updateChatState(chatId, { active: true })
 })
 </script>
