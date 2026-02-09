@@ -109,6 +109,7 @@ const md = new MarkdownIt({
 
 type Message = {
   id: string
+  message_id?: string
   role: 'user' | 'bot'
   raw: string
   html: string
@@ -121,6 +122,7 @@ type Message = {
 
 type StoredMessage = {
   id: string
+  message_id?: string
   role: 'user' | 'bot'
   raw: string
   ts?: number | null
@@ -517,6 +519,71 @@ function handleChatInfoUpdate(update: ChatInfoUpdate) {
   if (update.type === 'title') {
     historyRef.value?.applyChatInfoUpdate(update)
   }
+  if (update.type === 'message' && update.content) {
+    if (update.chat_id !== currentChatId.value) return
+    const role = update.content.role
+    const text = typeof update.content.content === 'string' ? update.content.content : ''
+    if (!role || !text) return
+    const messageTs = normalizeTimestamp(update.content.ts) ?? Date.now()
+    if (role === 'user') {
+      const messageId = update.content.message_id
+      if (
+        messageId &&
+        messages.value.some((item) => item.role === 'user' && item.message_id === messageId)
+      ) {
+        return
+      }
+      addMessage('user', text, messageTs, messageId)
+      const pendingIndex = messages.value.findIndex(
+        (item) => item.role === 'bot' && item.pending,
+      )
+      if (pendingIndex !== -1 && pendingIndex < messages.value.length - 1) {
+        const inserted = messages.value.pop()
+        if (inserted) {
+          messages.value.splice(pendingIndex, 0, inserted)
+        }
+      }
+      return
+    }
+    if (role === 'assistant') {
+      const messageId = update.content.message_id
+      let existingById: Message | undefined
+      if (messageId) {
+        existingById = [...messages.value]
+          .reverse()
+          .find((item) => item.role === 'bot' && item.message_id === messageId)
+      }
+      const pendingBot =
+        existingById ??
+        [...messages.value]
+          .reverse()
+          .find((item) => item.role === 'bot' && item.pending)
+      if (pendingBot) {
+        pendingBot.ts = messageTs
+        pendingBot.raw = text
+        pendingBot.html = sanitizeMarkdown(pendingBot.raw)
+        pendingBot.pending = false
+        if (messageId && !pendingBot.message_id) {
+          pendingBot.message_id = messageId
+        }
+        if (pendingBot.remotePending) {
+          pendingBot.remotePending = false
+          remotePendingId.value = null
+        }
+        if (typeof update.content.polished === 'boolean') {
+          pendingBot.polished = update.content.polished
+        }
+        const extracted = extractCitations(pendingBot.raw).map((url) => ({ url }))
+        pendingBot.citations = extracted.length ? extracted : []
+      } else {
+        const message = addMessage('bot', text, messageTs, messageId)
+        if (typeof update.content.polished === 'boolean') {
+          message.polished = update.content.polished
+        }
+      }
+      return
+    }
+  }
   if (update.type === 'answer' && update.content?.answer) {
     if (update.chat_id !== currentChatId.value) return
     const lastBot = [...messages.value].reverse().find((item) => item.role === 'bot')
@@ -695,9 +762,15 @@ function scrollToBottom() {
   logRef.value?.scrollToBottom()
 }
 
-function addMessage(role: Message['role'], text: string, ts?: number | null) {
+function addMessage(
+  role: Message['role'],
+  text: string,
+  ts?: number | null,
+  messageId?: string,
+) {
   const message = reactive<Message>({
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    message_id: messageId,
     role,
     raw: text,
     html: sanitizeMarkdown(text),
@@ -723,7 +796,7 @@ function ensureRemotePendingBubble() {
   if (localBusy.value) return
   const existing = [...messages.value].reverse().find((item) => item.role === 'bot' && item.pending)
   if (existing) return
-  const message = addMessage('bot', '', Date.now())
+  const message = addMessage('bot', '', Date.now(), messageId)
   message.raw = ''
   message.html = ''
   message.pending = true
@@ -758,6 +831,7 @@ function removeMessage(id: string) {
 function hydrateMessages(source: StoredMessage[]) {
   return source.map((message) => ({
     id: message.id,
+    message_id: message.message_id ?? (message.role === 'user' ? message.id : undefined),
     role: message.role,
     raw: message.raw,
     html: sanitizeMarkdown(message.raw),
@@ -806,6 +880,9 @@ type ChatInfoUpdate = {
     answer?: string
     polished?: boolean
     ts?: number
+    role?: 'user' | 'assistant'
+    content?: string
+    message_id?: string
   }
 }
 
@@ -1252,14 +1329,14 @@ async function loadModels() {
   }
 }
 
-async function streamCompletion(model: string, text: string) {
+async function streamCompletion(model: string, text: string, messageId: string, clientTs: number) {
   streamInfo.value = STRATEGY_STREAM_INFO
   const payload = {
     chat_id: currentChatId.value,
     model_id: model,
     prompt: text,
-    message_id: createScopedId('message'),
-    client_ts: Date.now(),
+    message_id: messageId,
+    client_ts: clientTs,
     stream: true,
     use_web: useWebSearch.value,
   }
@@ -1428,11 +1505,13 @@ async function handleSubmit() {
 
   const text = prompt.value.trim()
   prompt.value = ''
-  addMessage('user', text, Date.now())
+  const messageId = createScopedId('message')
+  const messageTs = Date.now()
+  addMessage('user', text, messageTs, messageId)
 
   localBusy.value = true
   try {
-    const ok = await streamCompletion(selectedModel.value, text)
+    const ok = await streamCompletion(selectedModel.value, text, messageId, messageTs)
     if (ok) {
       scheduleHistoryRefresh()
       scheduleMetaRefresh(currentChatId.value)

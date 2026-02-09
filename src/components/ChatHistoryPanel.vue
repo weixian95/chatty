@@ -137,6 +137,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type MessageLike = {
   id: string
+  message_id?: string
   role: 'user' | 'bot'
   raw: string
   ts?: number | null
@@ -535,7 +536,17 @@ async function fetchChatMessages(chatId: string): Promise<MessageLike[]> {
   const data = await res.json()
   const items = Array.isArray(data.messages) ? data.messages : []
   return items
-    .map((item: { role?: string; content?: string; ts?: number; message_id?: string; polished?: boolean }, index: number) => {
+    .map(
+      (
+        item: {
+          role?: string
+          content?: string
+          ts?: number
+          message_id?: string
+          polished?: boolean
+        },
+        index: number,
+      ) => {
       const role = item.role === 'assistant' ? 'bot' : 'user'
       const ts = normalizeTimestamp(item.ts)
       const id =
@@ -544,6 +555,7 @@ async function fetchChatMessages(chatId: string): Promise<MessageLike[]> {
           : `${(ts ?? Date.now())}-${index}-${Math.random().toString(16).slice(2)}`
       return {
         id,
+        message_id: typeof item.message_id === 'string' ? item.message_id : undefined,
         role,
         raw: typeof item.content === 'string' ? item.content : '',
         ts,
