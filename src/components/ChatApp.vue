@@ -249,10 +249,20 @@ const serverStatusAlert = computed(() => {
 const historyLocked = computed(() => localBusy.value)
 const currentChatState = computed(() => chatUiState[currentChatId.value])
 const remoteChatBusy = computed(() => {
+  const chatId = currentChatId.value
   const state = currentChatState.value
-  if (!state) return false
-  if (typeof state.input_disabled === 'boolean') return state.input_disabled
-  return Boolean(state.busy)
+  const busyFlag = state && typeof state.busy === 'boolean' ? state.busy : false
+  const inputDisabled =
+    state && typeof state.input_disabled === 'boolean' ? state.input_disabled : null
+  if (inputDisabled !== null) {
+    if (inputDisabled || busyFlag) return true
+  } else if (busyFlag) {
+    return true
+  }
+  if (Array.isArray(globalUiState.busy_chats) && chatId) {
+    return globalUiState.busy_chats.includes(chatId)
+  }
+  return Boolean(globalUiState.busy)
 })
 const busy = computed(() => localBusy.value || remoteChatBusy.value)
 const HEALTH_BASE_DELAY = 2000
@@ -796,7 +806,7 @@ function ensureRemotePendingBubble() {
   if (localBusy.value) return
   const existing = [...messages.value].reverse().find((item) => item.role === 'bot' && item.pending)
   if (existing) return
-  const message = addMessage('bot', '', Date.now(), messageId)
+  const message = addMessage('bot', '', Date.now())
   message.raw = ''
   message.html = ''
   message.pending = true
@@ -1350,7 +1360,7 @@ async function streamCompletion(model: string, text: string, messageId: string, 
     clearRemotePendingTimer()
   }
 
-  const message = addMessage('bot', '', Date.now())
+  const message = addMessage('bot', '', Date.now(), messageId)
   message.raw = ''
   message.html = ''
   message.pending = true

@@ -265,7 +265,10 @@ const conversationItems = computed<ConversationItem[]>(() => {
 
   return conversations.value.map(({ chatId, title, displayTs }) => {
     const state = props.chatStates?.[chatId]
-    const isBusy = Boolean(state?.input_disabled ?? state?.busy)
+    const inputDisabled =
+      typeof state?.input_disabled === 'boolean' ? state.input_disabled : false
+    const busyFlag = typeof state?.busy === 'boolean' ? state.busy : false
+    const isBusy = Boolean(inputDisabled || busyFlag)
     return {
       chatId,
       title,
